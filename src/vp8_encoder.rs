@@ -182,6 +182,8 @@ struct Vp8Encoder<W> {
     level_costs: LevelCosts,
     /// Whether to use trellis quantization for better RD optimization
     do_trellis: bool,
+    /// Whether to use chroma error diffusion to reduce banding
+    do_error_diffusion: bool,
 
     top_complexity: Vec<Complexity>,
     left_complexity: Complexity,
@@ -204,6 +206,13 @@ struct Vp8Encoder<W> {
     top_border_y: Vec<u8>,
     top_border_u: Vec<u8>,
     top_border_v: Vec<u8>,
+
+    // Error diffusion state for chroma DC coefficients
+    // This implements Floyd-Steinberg-like error spreading to reduce banding
+    // top_derr[mbx][channel][0..2] = errors from block above
+    // left_derr[channel][0..2] = errors from block to the left
+    top_derr: Vec<[[i8; 2]; 2]>,
+    left_derr: [[i8; 2]; 2],
 }
 
 impl<W: Write> Vp8Encoder<W> {
@@ -232,6 +241,8 @@ impl<W: Write> Vp8Encoder<W> {
             // probability tables and use VP8LevelCost-like calculation with context.
             // See tests in vp8_cost.rs for analysis (test_trellis_debug_block).
             do_trellis: false,
+            // Error diffusion improves quality in smooth gradients
+            do_error_diffusion: true,
 
             top_complexity: Vec::new(),
             left_complexity: Complexity::default(),
@@ -250,6 +261,10 @@ impl<W: Write> Vp8Encoder<W> {
             top_border_y: Vec::new(),
             top_border_u: Vec::new(),
             top_border_v: Vec::new(),
+
+            // Error diffusion starts with zero
+            top_derr: Vec::new(),
+            left_derr: [[0; 2]; 2],
         }
     }
 
@@ -535,6 +550,93 @@ impl<W: Write> Vp8Encoder<W> {
         );
     }
 
+    /// Apply Floyd-Steinberg-like error diffusion to chroma DC coefficients.
+    ///
+    /// This reduces banding artifacts in smooth gradients by spreading quantization
+    /// error to neighboring blocks. The pattern for a 2x2 grid of chroma blocks:
+    /// ```text
+    /// | c[0] | c[1] |    errors: err0, err1
+    /// | c[2] | c[3] |            err2, err3
+    /// ```
+    ///
+    /// Modifies the DC coefficients in place and stores errors for next macroblock.
+    fn apply_chroma_error_diffusion(
+        &mut self,
+        u_blocks: &mut [i32; 16 * 4],
+        v_blocks: &mut [i32; 16 * 4],
+        mbx: usize,
+        uv_matrix: &vp8_cost::VP8Matrix,
+    ) {
+        // Diffusion constants from libwebp
+        const C1: i32 = 7; // fraction from top
+        const C2: i32 = 8; // fraction from left
+        const DSHIFT: i32 = 4;
+        const DSCALE: i32 = 1;
+
+        let q = uv_matrix.q[0] as i32;
+        let iq = uv_matrix.iq[0];
+        let bias = uv_matrix.bias[0];
+
+        // Helper: add diffused error to DC, predict quantization, return error
+        // Does NOT overwrite the coefficient - leaves it adjusted for encoding
+        let diffuse_dc = |dc: &mut i32, top_err: i8, left_err: i8| -> i8 {
+            // Add diffused error from neighbors
+            let adjustment = (C1 * top_err as i32 + C2 * left_err as i32) >> (DSHIFT - DSCALE);
+            *dc += adjustment;
+
+            // Predict what quantization will produce (to compute error)
+            let sign = *dc < 0;
+            let abs_dc = dc.unsigned_abs();
+
+            let zthresh = ((1u32 << 17) - 1 - bias) / iq;
+            let level = if abs_dc > zthresh {
+                ((abs_dc * iq + bias) >> 17) as i32
+            } else {
+                0
+            };
+
+            // Error = |adjusted_input| - |reconstruction|
+            // This is what we'll diffuse to neighbors
+            let err = abs_dc as i32 - level * q;
+            let signed_err = if sign { -err } else { err };
+            (signed_err >> DSCALE).clamp(-127, 127) as i8
+        };
+
+        // Process each channel's 4 blocks in scan order
+        let process_channel =
+            |blocks: &mut [i32; 16 * 4], top: [i8; 2], left: [i8; 2]| -> [i8; 4] {
+                // Block 0 (position 0): top-left, uses top[0] and left[0]
+                let err0 = diffuse_dc(&mut blocks[0], top[0], left[0]);
+
+                // Block 1 (position 16): top-right, uses top[1] and err0
+                let err1 = diffuse_dc(&mut blocks[16], top[1], err0);
+
+                // Block 2 (position 32): bottom-left, uses err0 and left[1]
+                let err2 = diffuse_dc(&mut blocks[32], err0, left[1]);
+
+                // Block 3 (position 48): bottom-right, uses err1 and err2
+                let err3 = diffuse_dc(&mut blocks[48], err1, err2);
+
+                [err0, err1, err2, err3]
+            };
+
+        // Process U channel
+        let u_errs = process_channel(u_blocks, self.top_derr[mbx][0], self.left_derr[0]);
+        // Process V channel
+        let v_errs = process_channel(v_blocks, self.top_derr[mbx][1], self.left_derr[1]);
+
+        // Store errors for next macroblock
+        for (ch, errs) in [(0usize, u_errs), (1, v_errs)] {
+            let [_err0, err1, err2, err3] = errs;
+            // left[0] = err1, left[1] = 3/4 of err3
+            self.left_derr[ch][0] = err1;
+            self.left_derr[ch][1] = ((3 * err3 as i32) >> 2) as i8;
+            // top[0] = err2, top[1] = 1/4 of err3
+            self.top_derr[mbx][ch][0] = err2;
+            self.top_derr[mbx][ch][1] = (err3 as i32 - self.left_derr[ch][1] as i32) as i8;
+        }
+    }
+
     // 13 in specification, matches read_residual_data in the decoder
     fn encode_residual_data(
         &mut self,
@@ -626,11 +728,18 @@ impl<W: Write> Vp8Encoder<W> {
 
         plane = Plane::Chroma;
 
+        // Apply error diffusion to chroma if enabled
+        let mut u_diffused: [i32; 16 * 4] = *u_block_data;
+        let mut v_diffused: [i32; 16 * 4] = *v_block_data;
+        if self.do_error_diffusion {
+            self.apply_chroma_error_diffusion(&mut u_diffused, &mut v_diffused, mbx, &uv_matrix);
+        }
+
         // encode the 4 u 4x4 subblocks
         for y in 0usize..2 {
             let mut left = self.left_complexity.u[y];
             for x in 0usize..2 {
-                let block = u_block_data[y * 2 * 16 + x * 16..][..16]
+                let block = u_diffused[y * 2 * 16 + x * 16..][..16]
                     .try_into()
                     .unwrap();
 
@@ -656,7 +765,7 @@ impl<W: Write> Vp8Encoder<W> {
         for y in 0usize..2 {
             let mut left = self.left_complexity.v[y];
             for x in 0usize..2 {
-                let block = v_block_data[y * 2 * 16 + x * 16..][..16]
+                let block = v_diffused[y * 2 * 16 + x * 16..][..16]
                     .try_into()
                     .unwrap();
 
@@ -1178,6 +1287,8 @@ impl<W: Write> Vp8Encoder<W> {
         if use_two_pass {
             // ===== PASS 1: Collect token statistics for adaptive probabilities =====
             self.proba_stats.reset();
+            let mut total_mb: u32 = 0;
+            let mut skip_mb: u32 = 0;
 
             for mby in 0..self.macroblock_height {
                 // reset left complexity / bpreds for left of image
@@ -1201,13 +1312,23 @@ impl<W: Write> Vp8Encoder<W> {
                         macroblock_info.chroma_mode,
                     );
 
-                    // Record token statistics for this macroblock
-                    if !self.check_all_coeffs_zero(
+                    // Track skip statistics
+                    total_mb += 1;
+                    let all_zero = self.check_all_coeffs_zero(
                         &macroblock_info,
                         &y_block_data,
                         &u_block_data,
                         &v_block_data,
-                    ) {
+                    );
+                    if all_zero {
+                        skip_mb += 1;
+                        // Reset complexity for skipped blocks
+                        self.left_complexity
+                            .clear(macroblock_info.luma_mode != LumaMode::B);
+                        self.top_complexity[usize::from(mbx)]
+                            .clear(macroblock_info.luma_mode != LumaMode::B);
+                    } else {
+                        // Record token statistics for this macroblock
                         self.record_residual_stats(
                             &macroblock_info,
                             mbx as usize,
@@ -1215,14 +1336,18 @@ impl<W: Write> Vp8Encoder<W> {
                             &u_block_data,
                             &v_block_data,
                         );
-                    } else {
-                        // Reset complexity for skipped blocks
-                        self.left_complexity
-                            .clear(macroblock_info.luma_mode != LumaMode::B);
-                        self.top_complexity[usize::from(mbx)]
-                            .clear(macroblock_info.luma_mode != LumaMode::B);
                     }
                 }
+            }
+
+            // Compute skip probability from actual data
+            // prob_skip_false = P(macroblock has non-zero coefficients)
+            if total_mb > 0 {
+                let non_skip_mb = total_mb - skip_mb;
+                // Round to nearest: (255 * non_skip + total/2) / total
+                let prob = ((255 * non_skip_mb + total_mb / 2) / total_mb).min(255) as u8;
+                // Clamp to valid range [1, 254] - 0 means always skip, 255 means never skip
+                self.macroblock_no_skip_coeff = Some(prob.clamp(1, 254));
             }
 
             // Compute optimal probabilities from statistics
@@ -1250,6 +1375,7 @@ impl<W: Write> Vp8Encoder<W> {
             // reset left complexity / bpreds for left of image
             self.left_complexity = Complexity::default();
             self.left_b_pred = [IntraMode::default(); 4];
+            self.left_derr = [[0; 2]; 2]; // reset chroma error diffusion for row start
 
             self.left_border_y = [129u8; 16 + 1];
             self.left_border_u = [129u8; 8 + 1];
@@ -1974,6 +2100,11 @@ impl<W: Write> Vp8Encoder<W> {
         self.top_border_y = vec![127u8; usize::from(self.macroblock_width) * 16 + 4];
         self.top_border_u = vec![127u8; usize::from(self.macroblock_width) * 8];
         self.top_border_v = vec![127u8; usize::from(self.macroblock_width) * 8];
+
+        // Initialize error diffusion arrays (one entry per macroblock column)
+        // [channel][position], channels are U=0, V=1
+        self.top_derr = vec![[[0i8; 2]; 2]; usize::from(self.macroblock_width)];
+        self.left_derr = [[0; 2]; 2];
     }
 
     // this is for all the luma modes except B
