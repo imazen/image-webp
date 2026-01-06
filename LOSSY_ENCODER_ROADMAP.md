@@ -2,6 +2,29 @@
 
 This document captures our learnings and outlines a plan to match libwebp's encoding efficiency.
 
+---
+
+## ⚠️ STOP: No Benchmarking Until Full Port Complete
+
+**DO NOT run size/quality benchmarks until ALL libwebp algorithms are fully ported and integrated.**
+
+Premature benchmarking wastes time because:
+1. Individual optimizations interact non-linearly
+2. Partial implementations may regress when other features are added
+3. Tuning parameters before the full system exists leads to re-tuning later
+
+**Remaining work before benchmarking:**
+- [x] ~~Enable and tune segment-based quantization~~ - **DONE**: Full DCT-based analysis ported from libwebp
+- [x] ~~Implement optimal loop filter level selection~~ - **DONE**: `compute_filter_level()` ported from libwebp
+- [ ] Fix Intra4 mode with proper cost estimation (currently disabled)
+- [ ] Tune probability update thresholds with full system
+
+**When to benchmark:** After all the above are complete and integrated.
+
+**Ready for initial benchmark:** Segment-based quantization is now fully implemented and can be tested.
+
+---
+
 ## Current State
 
 ### Kodak Corpus Benchmark (24 images, 768x512)
@@ -58,10 +81,32 @@ This document captures our learnings and outlines a plan to match libwebp's enco
 - [x] Skip detection for zero macroblocks
 - [x] Loop filter (fixed level 63)
 
+### Recently Implemented
+- [x] Two-pass token counting with adaptive probability updates (quality < 85 only)
+- [x] Quality-to-quant mapping ported from libwebp
+- [x] ProbaStats for coefficient statistics tracking
+- [x] Segment infrastructure (4 segments with quant deltas, encoding ready)
+- [x] **DCT-based segment analysis** - Full port from libwebp:
+  - [x] BPS=32 work buffer layout matching libwebp
+  - [x] VP8DspScan block offsets for histogram collection
+  - [x] Forward DCT (VP8FTransform) for coefficient analysis
+  - [x] DC and TM mode prediction (VP8EncPredLuma16, VP8EncPredChroma8)
+  - [x] Histogram collection with proper binning (abs(coeff) >> 3)
+  - [x] Alpha calculation from histogram (ALPHA_SCALE * last_non_zero / max_value)
+  - [x] Proper border handling (VP8IteratorImport): left with corner, top row
+  - [x] Final alpha mix: (3 * luma_alpha + uv_alpha + 2) >> 2
+  - [x] Alpha inversion: MAX_ALPHA - alpha
+  - [x] K-means clustering for segment assignment (AssignSegments)
+  - [x] Weighted average from final cluster centers (SetSegmentAlphas)
+  - [x] Per-segment quantization computation (compute_segment_quant)
+
 ### Disabled/Incomplete
-- [ ] Intra4 mode (implemented but disabled - causes file bloat)
-- [ ] Segment-based quantization (infrastructure exists, not used)
-- [ ] Adaptive token probabilities (writes "no update" for all)
+- [ ] Intra4 mode (implemented but disabled - causes file bloat due to inaccurate cost estimation)
+
+### Not Implemented (Optional/Minor)
+- [ ] SmoothSegmentMap - Optional post-processing when `preprocessing & 1` is set
+- [ ] FastMBAnalyze - Fast path for low-quality encoding (method <= 1)
+- [ ] Mode pre-selection storage - libwebp stores best modes during analysis for reuse in encoding
 
 ## Analysis of the Gap
 
@@ -207,13 +252,16 @@ double QualityToCompression(double q) {
 
 **Decision**: This is cosmetic. Users can adjust Q to get desired size. Not worth the complexity.
 
-### 5. Loop Filter Optimization (LOW IMPACT)
+### 5. Loop Filter Optimization (DONE)
 
-**The Problem**: We use fixed filter_level=63 (maximum). libwebp computes optimal filter level.
+**Status**: Implemented via `compute_filter_level()` in `vp8_cost.rs`.
 
-**Impact**: Minimal on file size, some impact on decoded quality.
+The function computes filter level based on:
+- Quantizer index (via AC quantizer step from VP8_AC_TABLE)
+- Sharpness setting (0-7)
+- User filter strength (0-100, default 50)
 
-**What We Need**: Filter level selection based on quantization and image characteristics.
+Formula matches libwebp: `f = base_strength * level0 / 256` with proper clamping and cutoff.
 
 ## Implementation Roadmap
 
@@ -292,7 +340,7 @@ fn assign_segments(&mut self) {
 ### Phase 4: Polish (Target: Match libwebp within 5%)
 
 - Tune lambda values for RD optimization
-- Implement optimal loop filter selection
+- ~~Implement optimal loop filter selection~~ (DONE)
 - Profile and optimize hot paths
 
 ## Key Learnings
