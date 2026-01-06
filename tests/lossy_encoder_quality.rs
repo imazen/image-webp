@@ -2,14 +2,17 @@
 //!
 //! These tests compare the image-webp lossy encoder against libwebp:
 //! - Bitstream compatibility: libwebp can decode our output
-//! - Quality metrics: PSNR of decoded output
+//! - Quality metrics: PSNR and DSSIM of decoded output
 //! - Size comparison: our output vs libwebp's output at same quality
 //!
 //! Note: The current lossy encoder uses DC-only mode selection, so quality
 //! and size will be significantly worse than libwebp. These tests establish
 //! baselines and will improve as mode selection is implemented.
 
+use dssim_core::Dssim;
 use image_webp::{ColorType, EncoderParams, WebPEncoder};
+use imgref::ImgVec;
+use rgb::RGBA;
 
 /// Simple PSNR calculation (not great for perceptual quality, but simple)
 fn calculate_psnr(original: &[u8], decoded: &[u8]) -> f64 {
@@ -30,6 +33,58 @@ fn calculate_psnr(original: &[u8], decoded: &[u8]) -> f64 {
     }
 
     10.0 * (255.0 * 255.0 / mse).log10()
+}
+
+/// Calculate DSSIM (perceptual quality metric)
+/// Returns 0 for identical images, higher values indicate more difference
+/// DSSIM = 1/SSIM - 1, so 0.01 means SSIM ≈ 0.99
+fn calculate_dssim(original: &[u8], decoded: &[u8], width: u32, height: u32) -> f64 {
+    let w = width as usize;
+    let h = height as usize;
+
+    // Convert RGB8 to RGBA<f32> in linear light for dssim
+    // sRGB gamma decode: (x / 255)^2.2 approximation
+    fn srgb_to_linear(v: u8) -> f32 {
+        let x = v as f32 / 255.0;
+        if x <= 0.04045 {
+            x / 12.92
+        } else {
+            ((x + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    let orig_rgba: Vec<RGBA<f32>> = original
+        .chunks_exact(3)
+        .map(|p| {
+            RGBA::new(
+                srgb_to_linear(p[0]),
+                srgb_to_linear(p[1]),
+                srgb_to_linear(p[2]),
+                1.0,
+            )
+        })
+        .collect();
+    let dec_rgba: Vec<RGBA<f32>> = decoded
+        .chunks_exact(3)
+        .map(|p| {
+            RGBA::new(
+                srgb_to_linear(p[0]),
+                srgb_to_linear(p[1]),
+                srgb_to_linear(p[2]),
+                1.0,
+            )
+        })
+        .collect();
+
+    let orig_img: ImgVec<RGBA<f32>> = ImgVec::new(orig_rgba, w, h);
+    let dec_img: ImgVec<RGBA<f32>> = ImgVec::new(dec_rgba, w, h);
+
+    let dssim = Dssim::new();
+    let orig_dssim = dssim.create_image(&orig_img).unwrap();
+    let dec_dssim = dssim.create_image(&dec_img).unwrap();
+
+    let (dssim_val, _) = dssim.compare(&orig_dssim, dec_dssim);
+    dssim_val.into()
 }
 
 /// Helper to create lossy encoder params
@@ -129,7 +184,7 @@ fn size_comparison_vs_libwebp() {
     }
 }
 
-/// Compare decoded quality (PSNR) at same file size
+/// Compare decoded quality (PSNR and DSSIM) at same quality setting
 #[test]
 fn quality_comparison_at_same_size() {
     let width = 128u32;
@@ -151,10 +206,8 @@ fn quality_comparison_at_same_size() {
     // Encode with libwebp at quality 75
     let libwebp_encoder = webp::Encoder::from_rgb(&img, width, height);
     let libwebp_output = libwebp_encoder.encode(75.0);
-    let _target_size = libwebp_output.len();
 
-    // Find quality setting that produces similar size with our encoder
-    // (binary search or just try a few values)
+    // Encode with our encoder at same quality
     let mut our_output = Vec::new();
     let mut encoder = WebPEncoder::new(&mut our_output);
     encoder.set_params(lossy_params(75));
@@ -162,7 +215,7 @@ fn quality_comparison_at_same_size() {
         .encode(&img, width, height, ColorType::Rgb8)
         .expect("Our encoding failed");
 
-    // Decode both and compare PSNR
+    // Decode both
     let our_decoded = webp::Decoder::new(&our_output)
         .decode()
         .expect("Failed to decode our output");
@@ -170,28 +223,48 @@ fn quality_comparison_at_same_size() {
         .decode()
         .expect("Failed to decode libwebp output");
 
+    // Calculate both PSNR and DSSIM
     let our_psnr = calculate_psnr(&img, &our_decoded);
     let libwebp_psnr = calculate_psnr(&img, &libwebp_decoded);
+    let our_dssim = calculate_dssim(&img, &our_decoded, width, height);
+    let libwebp_dssim = calculate_dssim(&img, &libwebp_decoded, width, height);
 
+    println!("=== Quality Comparison at Q75 ===");
     println!(
-        "Our encoder: {} bytes, PSNR = {:.2} dB",
+        "Our encoder: {} bytes, PSNR = {:.2} dB, DSSIM = {:.6}",
         our_output.len(),
-        our_psnr
+        our_psnr,
+        our_dssim
     );
     println!(
-        "libwebp:     {} bytes, PSNR = {:.2} dB",
+        "libwebp:     {} bytes, PSNR = {:.2} dB, DSSIM = {:.6}",
         libwebp_output.len(),
-        libwebp_psnr
+        libwebp_psnr,
+        libwebp_dssim
+    );
+    println!(
+        "Ratio: size {:.2}x, PSNR {:.1}%, DSSIM {:.2}x",
+        our_output.len() as f64 / libwebp_output.len() as f64,
+        100.0 * our_psnr / libwebp_psnr,
+        our_dssim / libwebp_dssim.max(0.0001) // avoid div by zero
     );
 
-    // Our quality should be at least 80% of libwebp's
-    // (generous threshold for initial implementation)
+    // Our quality should be at least 80% of libwebp's PSNR
     let quality_ratio = our_psnr / libwebp_psnr;
     assert!(
         quality_ratio > 0.8,
         "Our quality ({:.2} dB) is less than 80% of libwebp ({:.2} dB)",
         our_psnr,
         libwebp_psnr
+    );
+
+    // DSSIM should not be more than 3x worse than libwebp
+    // (DSSIM: lower is better, so we check if ours is less than 3x theirs)
+    assert!(
+        our_dssim < libwebp_dssim * 3.0,
+        "Our DSSIM ({:.6}) is more than 3x worse than libwebp ({:.6})",
+        our_dssim,
+        libwebp_dssim
     );
 }
 
@@ -270,16 +343,4 @@ fn create_noise_image(w: u32, h: u32) -> Vec<u8> {
     let mut img = vec![0u8; (w * h * 3) as usize];
     rand::thread_rng().fill_bytes(&mut img);
     img
-}
-
-#[cfg(feature = "ssimulacra2")]
-mod ssimulacra_tests {
-    use super::*;
-    use ssimulacra2::Ssimulacra2;
-
-    #[test]
-    fn ssimulacra2_quality_comparison() {
-        // TODO: Add SSIMULACRA2-based quality comparison
-        // This is the gold standard for perceptual quality
-    }
 }

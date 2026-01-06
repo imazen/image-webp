@@ -17,9 +17,12 @@ byteorder-lite = "0.1.0"
 quick-error = "2.0.1"
 
 [dev-dependencies]
+dssim-core = "3.3"
+imgref = "1.10"
 paste = "1.0.14"
 png = "0.17.12"
 rand = "0.8.5"
+rgb = "0.8"
 webp = "0.3.0"
 
 [features]
