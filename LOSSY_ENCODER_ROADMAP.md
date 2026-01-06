@@ -4,25 +4,36 @@ This document captures our learnings and outlines a plan to match libwebp's enco
 
 ## Current State
 
-### Performance Summary (128x128 test image, Q75)
+### Kodak Corpus Benchmark (24 images, 768x512)
 
-| Metric | Our Encoder | libwebp | Ratio |
-|--------|-------------|---------|-------|
-| File size | 10,088 bytes | 7,124 bytes | 1.42x larger |
-| PSNR | 16.89 dB | 16.91 dB | 99.9% |
-| Bits per pixel | 4.93 bpp | 3.48 bpp | 1.42x |
+**Rate-Distortion Comparison at Equal Bits Per Pixel:**
 
-**Key insight**: At equal file sizes, we achieve ~99% of libwebp's quality. The gap is purely encoding efficiency, not quality decisions.
+| BPP | Our PSNR | libwebp PSNR | Difference | Our Q | libwebp Q |
+|-----|----------|--------------|------------|-------|-----------|
+| 0.25 | 28.18 dB | 30.57 dB | **-2.38 dB** | Q33 | Q21 |
+| 0.50 | 30.43 dB | 32.18 dB | **-1.76 dB** | Q51 | Q41 |
+| 0.75 | 32.12 dB | 33.80 dB | **-1.68 dB** | Q63 | Q57 |
+| 1.00 | 33.42 dB | 35.26 dB | **-1.85 dB** | Q71 | Q68 |
+| 1.50 | 35.28 dB | 37.54 dB | **-2.26 dB** | Q80 | Q82 |
+| 2.00 | 36.64 dB | 39.20 dB | **-2.56 dB** | Q85 | Q88 |
+| 3.00 | 38.19 dB | 41.12 dB | **-2.93 dB** | Q92 | Q93 |
 
-### Size Ratio vs Quality Setting
+**Average PSNR difference at equal BPP: -2.27 dB (SIGNIFICANTLY WORSE)**
 
-| Quality | Our Size | libwebp Size | Ratio |
-|---------|----------|--------------|-------|
-| Q50 | 4,800 bytes | 5,884 bytes | 0.82x (smaller!) |
-| Q75 | 10,088 bytes | 7,124 bytes | 1.42x |
-| Q90 | 17,316 bytes | 10,416 bytes | 1.66x |
+### Size Comparison at Same Quality Setting
 
-**Observation**: We're actually more efficient at low quality (Q50) but progressively less efficient at high quality. This suggests our overhead is per-coefficient, not per-macroblock.
+| Quality | Our Size | libwebp Size | Size Ratio | PSNR Δ |
+|---------|----------|--------------|------------|--------|
+| Q20 | 229 KB | 480 KB | 47.8% | -3.58 dB |
+| Q50 | 614 KB | 851 KB | 72.1% | -3.00 dB |
+| Q75 | 1,441 KB | 1,178 KB | 122.3% | -1.00 dB |
+| Q90 | 2,925 KB | 2,372 KB | 123.3% | -1.87 dB |
+
+**Key Observations:**
+1. At low quality (Q20-50), we produce SMALLER files but with MUCH WORSE quality
+2. At high quality (Q75+), we produce LARGER files with slightly worse quality
+3. Our quality curve is completely miscalibrated vs libwebp
+4. The -2.27 dB average gap is substantial (perceptually noticeable)
 
 ## What's Implemented
 
@@ -52,7 +63,64 @@ This document captures our learnings and outlines a plan to match libwebp's enco
 - [ ] Segment-based quantization (infrastructure exists, not used)
 - [ ] Adaptive token probabilities (writes "no update" for all)
 
+## Analysis of the Gap
+
+The -2.27 dB gap breaks down into several components:
+
+### Quality Curve Analysis
+
+At Q20:
+- Our size: 229 KB (47.8% of libwebp's 480 KB)
+- Our PSNR: 26.83 dB vs libwebp's 30.41 dB (-3.58 dB)
+
+At equal BPP (0.25):
+- We need Q33, libwebp needs Q21 to produce same file size
+- Our quant index: `127 - 33*127/100 = 85`
+- libwebp's quant index (via their formula): ~61
+
+**Key insight**: At Q33 we use quant 85 (aggressive), libwebp at Q21 uses quant 61 (less aggressive). Yet we both produce 0.25 BPP. This means:
+1. We're spending more bits on overhead (mode signaling, probability encoding)
+2. Less of our bits go to actual coefficient data
+3. Even with more aggressive quantization, our files aren't proportionally smaller
+
+### Encoding Efficiency Problem
+At Q75+, we produce larger files with slightly worse quality. This suggests:
+1. Coefficient encoding overhead (token probabilities)
+2. Mode signaling overhead
+3. Possibly suboptimal mode decisions
+
+### What to Investigate
+1. **Dump quantization values** - Compare our quant indices vs libwebp at same Q
+2. **Dump mode decisions** - Compare I16 vs I4 choices
+3. **Dump coefficient statistics** - Compare coefficient distributions
+4. **Check reconstruction** - Verify our dequant/IDCT matches libwebp
+
 ## What's Missing (Root Causes of Inefficiency)
+
+### 0. Quality-to-Quant Mapping (CRITICAL - INVESTIGATE FIRST)
+
+**The Problem**: Our Q20 produces 47.8% of libwebp's file size. This is not just encoding efficiency - we're quantizing much more aggressively.
+
+**Investigation Needed**:
+```rust
+// At Q75, what quant index do we use vs libwebp?
+// Our formula: quant = 127 - (75 * 127 / 100) = 32
+// What does libwebp use?
+```
+
+**libwebp's Formula** (from `src/enc/quant_enc.c`):
+```c
+const double Q = quality / 100.;
+const double linear_c = (Q < 0.75) ? Q * (2./3.) : 2. * Q - 1.;
+const double c = pow(linear_c, 1./3.);
+const int q = (int)(127. * (1. - c));
+// Plus segment alpha adjustments
+```
+
+At Q75: `linear_c = 0.5`, `c = 0.794`, `q = 26`
+Our formula gives: `q = 32`
+
+So we're using **higher quantization** (32 vs 26) = more compression = smaller files at low Q. But we're still getting worse quality!
 
 ### 1. Adaptive Token Probability Updates (HIGH IMPACT)
 
