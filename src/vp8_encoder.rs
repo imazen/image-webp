@@ -235,13 +235,13 @@ impl<W: Write> Vp8Encoder<W> {
             proba_stats: ProbaStats::new(),
             updated_probs: None,
             level_costs: LevelCosts::new(),
-            // Trellis quantization uses probability-dependent costs with context tracking.
-            // Currently disabled because the cost model needs more calibration:
-            // - Skip cost initialization uses approximate probability
-            // - EOB cost uses fixed approximation
-            // - May need to verify Plane vs TokenType indexing matches LevelCosts
-            // With trellis: smaller files but lower quality metrics
-            // Without trellis: larger files but better SSIMULACRA2
+            // Trellis quantization for RD-optimized coefficient selection.
+            // Currently disabled because it significantly degrades quality:
+            // - At Q75: 8930 bytes with trellis vs 9200 bytes without
+            // - SSIMULACRA2: 10.29 with trellis vs 21.02 without
+            // The trellis implementation follows libwebp's approach with proper
+            // probability-dependent EOB and skip costs, but still over-quantizes.
+            // Root cause unclear - possibly lambda tuning or cost model mismatch.
             do_trellis: false,
             // Error diffusion improves quality in smooth gradients
             do_error_diffusion: true,
@@ -1309,6 +1309,12 @@ impl<W: Write> Vp8Encoder<W> {
 
         if use_two_pass {
             // ===== PASS 1: Collect token statistics for adaptive probabilities =====
+            // Disable trellis during pass 1 to ensure consistent statistics collection.
+            // The statistics should reflect simple quantization, then trellis optimizes
+            // the actual encoding in pass 2 using those probabilities.
+            let trellis_during_pass2 = self.do_trellis;
+            self.do_trellis = false;
+
             self.proba_stats.reset();
             let mut total_mb: u32 = 0;
             let mut skip_mb: u32 = 0;
@@ -1377,9 +1383,12 @@ impl<W: Write> Vp8Encoder<W> {
             self.compute_updated_probabilities();
 
             // Calculate level costs based on final probabilities
-            // This enables accurate I4 coefficient cost estimation
+            // This enables accurate mode cost estimation and trellis decisions in pass 2
             let probs = self.updated_probs.as_ref().unwrap_or(&self.token_probs);
             self.level_costs.calculate(probs);
+
+            // Restore trellis setting for pass 2
+            self.do_trellis = trellis_during_pass2;
 
             // Reset state for actual encoding pass
             self.reset_for_second_pass();

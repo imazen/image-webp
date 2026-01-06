@@ -893,10 +893,9 @@ pub fn trellis_quantize_block(
     // Best path tracking: [last_pos, level_delta, prev_delta]
     let mut best_path = [-1i32; 3];
 
-    // Initialize: compute skip score (all zeros)
-    // Skip cost depends on initial context
-    let band_first = VP8_ENC_BANDS[first] as usize;
-    let skip_cost = level_costs.level_cost[ctype][band_first][ctx0][0] as i64;
+    // Initialize: compute skip score (all zeros = signal EOB immediately)
+    // Skip means signaling EOB at the first position, not encoding a zero coefficient.
+    let skip_cost = level_costs.get_skip_eob_cost(ctype, first, ctx0) as i64;
     let mut best_score = rd_score_trellis(lambda, skip_cost, 0);
 
     // Initialize source nodes with cost table for first position based on ctx0
@@ -999,10 +998,8 @@ pub fn trellis_quantize_block(
             if level != 0 && best_cur_score < best_score {
                 // Add end-of-block cost: signaling "no more coefficients"
                 // Uses the context resulting from this level
-                let _band = VP8_ENC_BANDS[n + 1] as usize;
-                // TODO: Use proper EOB probability from level_costs
                 let eob_cost = if n < 15 {
-                    vp8_bit_cost(false, 128) as i64 // approximate EOB cost
+                    level_costs.get_eob_cost(ctype, n, ctx) as i64
                 } else {
                     0
                 };
@@ -1460,6 +1457,9 @@ pub struct LevelCosts {
     /// Remapped indices: [type][position] -> band index for each type
     /// Usage: level_cost[type][remapped[type][n]][ctx][level]
     remapped: [RemappedCosts; NUM_TYPES],
+    /// EOB (end-of-block) costs indexed by [type][band][ctx]
+    /// This is the cost of signaling "no more coefficients"
+    eob_cost: [[[u16; NUM_CTX]; NUM_BANDS]; NUM_TYPES],
     /// Whether the tables are dirty and need recalculation
     dirty: bool,
 }
@@ -1476,6 +1476,7 @@ impl LevelCosts {
         Self {
             level_cost: [[[[0u16; MAX_VARIABLE_LEVEL + 1]; NUM_CTX]; NUM_BANDS]; NUM_TYPES],
             remapped: [[[0usize; NUM_CTX]; 16]; NUM_TYPES],
+            eob_cost: [[[0u16; NUM_CTX]; NUM_BANDS]; NUM_TYPES],
             dirty: true,
         }
     }
@@ -1521,6 +1522,10 @@ impl LevelCosts {
                         self.level_cost[ctype][band][ctx][v] =
                             cost_base + variable_level_cost(v, p);
                     }
+
+                    // EOB cost: signaling "no more coefficients" after this position
+                    // This is the cost of taking the EOB branch in the coefficient tree
+                    self.eob_cost[ctype][band][ctx] = vp8_bit_cost(false, p[0]);
                 }
             }
 
@@ -1551,6 +1556,25 @@ impl LevelCosts {
     pub fn get_cost_table(&self, ctype: usize, position: usize, ctx: usize) -> &LevelCostArray {
         let band = self.remapped[ctype][position][ctx];
         &self.level_cost[ctype][band][ctx]
+    }
+
+    /// Get the EOB (end-of-block) cost for terminating after position n.
+    /// This is the cost of signaling "no more coefficients" at position n+1.
+    /// The context should be based on the level at position n (ctx = min(level, 2)).
+    #[inline]
+    pub fn get_eob_cost(&self, ctype: usize, position: usize, ctx: usize) -> u16 {
+        // EOB is signaled at position n+1, so use band for n+1
+        let next_pos = (position + 1).min(15);
+        let band = VP8_ENC_BANDS[next_pos] as usize;
+        self.eob_cost[ctype][band][ctx]
+    }
+
+    /// Get the EOB cost for signaling "no coefficients at all" at position first.
+    /// Used for skip (all-zero block) calculation.
+    #[inline]
+    pub fn get_skip_eob_cost(&self, ctype: usize, first: usize, ctx: usize) -> u16 {
+        let band = VP8_ENC_BANDS[first] as usize;
+        self.eob_cost[ctype][band][ctx]
     }
 }
 
@@ -3363,6 +3387,134 @@ mod tests {
                 .sum();
 
             eprintln!("  Simple SSE: {}, Trellis SSE: {}", simple_sse, trellis_sse);
+        }
+    }
+
+    /// Diagnostic test to capture all data needed to debug trellis calibration.
+    /// Run with: cargo test --release test_trellis_diagnostic -- --nocapture
+    #[test]
+    fn test_trellis_diagnostic() {
+        use crate::vp8_common::COEFF_PROBS;
+
+        let matrix = VP8Matrix::new(27, 30, MatrixType::Y1);
+        let mut level_costs = LevelCosts::new();
+        level_costs.calculate(&COEFF_PROBS);
+
+        // Test block that showed issues: small coefficient at position 4
+        let block = [20i32, -8, 0, 0, -17, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let lambda = 787u32;
+        let ctype = 3usize; // I4
+        let ctx0 = 0usize;
+
+        eprintln!("\n=== TRELLIS DIAGNOSTIC ===");
+        eprintln!("Lambda: {}", lambda);
+        eprintln!("Block type: {} (I4)", ctype);
+        eprintln!("Initial context: {}", ctx0);
+        eprintln!("Input block (natural order): {:?}", block);
+
+        // Show quantization parameters
+        eprintln!("\nQuantization parameters:");
+        eprintln!("  DC q={}, iq={}, bias={}", matrix.q[0], matrix.iq[0], matrix.bias[0]);
+        eprintln!("  AC q={}, iq={}, bias={}", matrix.q[1], matrix.iq[1], matrix.bias[1]);
+
+        // Show cost table values for position 0, contexts 0,1,2
+        eprintln!("\nCost tables for position 0 (levels 0,1,2):");
+        for ctx in 0..3 {
+            let costs = level_costs.get_cost_table(ctype, 0, ctx);
+            eprintln!("  ctx={}: level0={}, level1={}, level2={}",
+                ctx, costs[0], costs[1], costs[2]);
+        }
+
+        // Simple quantization
+        let mut simple_out = [0i32; 16];
+        for i in 0..16 {
+            let j = VP8_ZIGZAG[i];
+            simple_out[i] = matrix.quantize_coeff(block[j], j);
+        }
+        eprintln!("\nSimple quantization (zigzag): {:?}", simple_out);
+
+        // Per-coefficient analysis
+        eprintln!("\nPer-coefficient analysis:");
+        eprintln!("{:>3} {:>6} {:>6} {:>6} {:>10} {:>10} {:>10}",
+            "pos", "input", "simple", "level0", "cost_l0", "cost_l1", "dist_diff");
+
+        for n in 0..8 {
+            let j = VP8_ZIGZAG[n];
+            let coeff = block[j];
+            let q = matrix.q[j] as i32;
+            let iq = matrix.iq[j];
+
+            // Compute level0 (base quantization with neutral bias)
+            let sign = coeff < 0;
+            let abs_coeff = if sign { -coeff } else { coeff };
+            let level0 = quantdiv(abs_coeff as u32, iq, quantization_bias(0x00)).min(MAX_LEVEL as i32);
+
+            // Get cost table (assume ctx=0 for simplicity)
+            let costs = level_costs.get_cost_table(ctype, n, 0);
+
+            // Cost for level0 and level0+1
+            let cost_l0 = VP8_LEVEL_FIXED_COSTS[level0 as usize] as u32
+                + costs[level0.min(MAX_VARIABLE_LEVEL as i32) as usize] as u32
+                + if level0 > 0 { 256 } else { 0 };
+            let cost_l1 = VP8_LEVEL_FIXED_COSTS[(level0 + 1).min(MAX_LEVEL as i32) as usize] as u32
+                + costs[(level0 + 1).min(MAX_VARIABLE_LEVEL as i32) as usize] as u32
+                + 256; // always non-zero
+
+            // Distortion difference if we use level0+1 instead of level0
+            let err0 = abs_coeff - level0 * q;
+            let err1 = abs_coeff - (level0 + 1) * q;
+            let dist_diff = err1 * err1 - err0 * err0;
+
+            eprintln!("{:>3} {:>6} {:>6} {:>6} {:>10} {:>10} {:>10}",
+                n, coeff, simple_out[n], level0, cost_l0, cost_l1, dist_diff);
+        }
+
+        // RD decision analysis
+        eprintln!("\nRD decision at lambda={}:", lambda);
+        eprintln!("For level0 -> level0+1: chose higher level if:");
+        eprintln!("  lambda * (cost_l1 - cost_l0) < 256 * (dist0 - dist1)");
+        eprintln!("  {} * cost_delta < 256 * dist_delta", lambda);
+
+        // EOB cost analysis
+        eprintln!("\nEOB cost analysis (approximate=128 vs actual p[0]):");
+        let eob_approx = vp8_bit_cost(false, 128);
+        for band in 0..8 {
+            let p0_0 = COEFF_PROBS[ctype][band][0][0];
+            let p0_1 = COEFF_PROBS[ctype][band][1][0];
+            let p0_2 = COEFF_PROBS[ctype][band][2][0];
+            let eob_0 = vp8_bit_cost(false, p0_0);
+            let eob_1 = vp8_bit_cost(false, p0_1);
+            let eob_2 = vp8_bit_cost(false, p0_2);
+            eprintln!(
+                "  band {}: ctx0: p0={:3} eob={:3} (diff={:+4}), ctx1: p0={:3} eob={:3} (diff={:+4}), ctx2: p0={:3} eob={:3} (diff={:+4})",
+                band,
+                p0_0, eob_0, eob_0 as i32 - eob_approx as i32,
+                p0_1, eob_1, eob_1 as i32 - eob_approx as i32,
+                p0_2, eob_2, eob_2 as i32 - eob_approx as i32
+            );
+        }
+
+        // Run trellis
+        let mut coeffs = block;
+        let mut trellis_out = [0i32; 16];
+        let _ = trellis_quantize_block(
+            &mut coeffs,
+            &mut trellis_out,
+            &matrix,
+            lambda,
+            0,
+            &level_costs,
+            ctype,
+            ctx0,
+        );
+        eprintln!("\nTrellis output (zigzag): {:?}", trellis_out);
+
+        // Show differences
+        eprintln!("\nDifferences (simple vs trellis):");
+        for n in 0..16 {
+            if simple_out[n] != trellis_out[n] {
+                eprintln!("  pos {}: simple={}, trellis={}", n, simple_out[n], trellis_out[n]);
+            }
         }
     }
 }
