@@ -8,8 +8,8 @@ use crate::vp8_arithmetic_encoder::ArithmeticEncoder;
 use crate::vp8_common::*;
 use crate::vp8_cost::{
     self, analyze_image, assign_segments_kmeans, compute_segment_quant, estimate_dc16_cost,
-    estimate_residual_cost, get_cost_luma4, record_coeffs, LevelCosts, ProbaStats, TokenType,
-    FIXED_COSTS_I16, FIXED_COSTS_UV, LAMBDA_I16, LAMBDA_UV,
+    estimate_residual_cost, get_cost_luma4, record_coeffs, trellis_quantize_block, LevelCosts,
+    ProbaStats, TokenType, FIXED_COSTS_I16, FIXED_COSTS_UV, LAMBDA_I16, LAMBDA_UV,
 };
 // Intra4 imports for coefficient-level cost estimation (used in pick_best_intra4)
 use crate::vp8_cost::{calc_i4_penalty, get_i4_mode_cost, LAMBDA_I4};
@@ -180,6 +180,8 @@ struct Vp8Encoder<W> {
     updated_probs: Option<TokenProbTables>,
     /// Precomputed level costs for coefficient cost estimation
     level_costs: LevelCosts,
+    /// Whether to use trellis quantization for better RD optimization
+    do_trellis: bool,
 
     top_complexity: Vec<Complexity>,
     left_complexity: Complexity,
@@ -224,6 +226,10 @@ impl<W: Write> Vp8Encoder<W> {
             proba_stats: ProbaStats::new(),
             updated_probs: None,
             level_costs: LevelCosts::new(),
+            // TODO: Trellis quantization infrastructure is in place but disabled
+            // due to a bug causing PSNR regression. Needs debugging.
+            // See LOSSY_ENCODER_ROADMAP.md for details.
+            do_trellis: false,
 
             top_complexity: Vec::new(),
             left_complexity: Complexity::default(),
@@ -543,11 +549,25 @@ impl<W: Write> Vp8Encoder<W> {
             Plane::Y2
         };
 
-        // Extract VP8 matrices upfront to avoid borrow conflicts
+        // Extract VP8 matrices and trellis lambdas upfront to avoid borrow conflicts
         let segment = &self.segments[macroblock_info.segment_id.unwrap_or(0)];
         let y1_matrix = segment.y1_matrix.clone().unwrap();
         let y2_matrix = segment.y2_matrix.clone().unwrap();
         let uv_matrix = segment.uv_matrix.clone().unwrap();
+
+        // Trellis lambda for Y1 blocks (I4 vs I16 mode)
+        let is_i4 = macroblock_info.luma_mode == LumaMode::B;
+        let y1_trellis_lambda = if self.do_trellis {
+            Some(if is_i4 {
+                segment.lambda_trellis_i4
+            } else {
+                segment.lambda_trellis_i16
+            })
+        } else {
+            None
+        };
+        // Note: libwebp disables trellis for UV (DO_TRELLIS_UV = 0)
+        // and for Y2 DC coefficients, so we use None for those
 
         // Y2
         if plane == Plane::Y2 {
@@ -565,6 +585,7 @@ impl<W: Write> Vp8Encoder<W> {
                 plane,
                 complexity.into(),
                 &y2_matrix,
+                None, // No trellis for Y2 DC
             );
 
             self.left_complexity.y2 = if has_coeffs { 1 } else { 0 };
@@ -591,6 +612,7 @@ impl<W: Write> Vp8Encoder<W> {
                     plane,
                     complexity.into(),
                     &y1_matrix,
+                    y1_trellis_lambda,
                 );
 
                 left = if has_coeffs { 1 } else { 0 };
@@ -619,6 +641,7 @@ impl<W: Write> Vp8Encoder<W> {
                     plane,
                     complexity.into(),
                     &uv_matrix,
+                    None, // No trellis for UV (libwebp: DO_TRELLIS_UV = 0)
                 );
 
                 left = if has_coeffs { 1 } else { 0 };
@@ -644,6 +667,7 @@ impl<W: Write> Vp8Encoder<W> {
                     plane,
                     complexity.into(),
                     &uv_matrix,
+                    None, // No trellis for UV (libwebp: DO_TRELLIS_UV = 0)
                 );
 
                 left = if has_coeffs { 1 } else { 0 };
@@ -662,6 +686,7 @@ impl<W: Write> Vp8Encoder<W> {
         plane: Plane,
         complexity: usize,
         matrix: &vp8_cost::VP8Matrix,
+        trellis_lambda: Option<u32>,
     ) -> bool {
         // transform block
         // dc is used for the 0th coefficient, ac for the others
@@ -677,9 +702,17 @@ impl<W: Write> Vp8Encoder<W> {
         // convert to zigzag and quantize using VP8Matrix biased quantization
         // this is the only lossy part of the encoding
         let mut zigzag_block = [0i32; 16];
-        for i in first_coeff..16 {
-            let zigzag_index = usize::from(ZIGZAG[i]);
-            zigzag_block[i] = matrix.quantize_coeff(block[zigzag_index], zigzag_index);
+
+        if let Some(lambda) = trellis_lambda {
+            // Trellis quantization for better RD optimization
+            let mut coeffs = *block;
+            trellis_quantize_block(&mut coeffs, &mut zigzag_block, matrix, lambda, first_coeff);
+        } else {
+            // Simple quantization
+            for i in first_coeff..16 {
+                let zigzag_index = usize::from(ZIGZAG[i]);
+                zigzag_block[i] = matrix.quantize_coeff(block[zigzag_index], zigzag_index);
+            }
         }
 
         // get index of last coefficient that isn't 0
@@ -915,6 +948,13 @@ impl<W: Write> Vp8Encoder<W> {
         };
         let first_coeff = if is_i4 { 0 } else { 1 };
 
+        // Get trellis lambda based on block type
+        let trellis_lambda = if is_i4 {
+            segment.lambda_trellis_i4
+        } else {
+            segment.lambda_trellis_i16
+        };
+
         for y in 0usize..4 {
             let mut left = self.left_complexity.y[y];
             for x in 0..4 {
@@ -924,9 +964,17 @@ impl<W: Write> Vp8Encoder<W> {
 
                 // Quantize to zigzag order
                 let mut zigzag = [0i32; 16];
-                for i in first_coeff..16 {
-                    let zigzag_index = usize::from(ZIGZAG[i]);
-                    zigzag[i] = y1_matrix.quantize_coeff(block[zigzag_index], zigzag_index);
+
+                if self.do_trellis {
+                    // Trellis quantization: optimizes coefficient levels for RD
+                    let mut coeffs = *block;
+                    trellis_quantize_block(&mut coeffs, &mut zigzag, &y1_matrix, trellis_lambda, first_coeff);
+                } else {
+                    // Simple quantization
+                    for i in first_coeff..16 {
+                        let zigzag_index = usize::from(ZIGZAG[i]);
+                        zigzag[i] = y1_matrix.quantize_coeff(block[zigzag_index], zigzag_index);
+                    }
                 }
 
                 let top = self.top_complexity[mbx].y[x];

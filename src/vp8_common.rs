@@ -740,10 +740,16 @@ pub(crate) struct Segment {
     pub(crate) y1_matrix: Option<VP8Matrix>,
     pub(crate) y2_matrix: Option<VP8Matrix>,
     pub(crate) uv_matrix: Option<VP8Matrix>,
+
+    // Lambda values for trellis quantization (scaled by 256 for fixed-point)
+    // Computed as: lambda = (scale * q^2) where q is the AC quantizer
+    pub(crate) lambda_trellis_i4: u32,
+    pub(crate) lambda_trellis_i16: u32,
+    pub(crate) lambda_trellis_uv: u32,
 }
 
 impl Segment {
-    /// Initialize quantization matrices from the quantizer values
+    /// Initialize quantization matrices and trellis lambdas from the quantizer values
     pub(crate) fn init_matrices(&mut self) {
         self.y1_matrix = Some(VP8Matrix::new(
             self.ydc as u16,
@@ -760,5 +766,18 @@ impl Segment {
             self.uvac as u16,
             MatrixType::UV,
         ));
+
+        // Compute trellis lambda values based on quantizer
+        // These formulas match libwebp's SetSegmentProbas:
+        // lambda_trellis_i4 = (7 * q^2) >> 3
+        // lambda_trellis_i16 = q^2 >> 2
+        // lambda_trellis_uv = q^2 << 1
+        let q_i4 = self.yac as u32;
+        let q_i16 = self.y2ac as u32;
+        let q_uv = self.uvac as u32;
+
+        self.lambda_trellis_i4 = ((7 * q_i4 * q_i4) >> 3).max(1);
+        self.lambda_trellis_i16 = ((q_i16 * q_i16) >> 2).max(1);
+        self.lambda_trellis_uv = ((q_uv * q_uv) << 1).max(1);
     }
 }
