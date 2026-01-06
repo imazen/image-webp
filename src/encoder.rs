@@ -379,6 +379,22 @@ impl Default for EncoderParams {
     }
 }
 
+impl EncoderParams {
+    /// Create parameters for lossless encoding (default).
+    pub fn lossless() -> Self {
+        Self::default()
+    }
+
+    /// Create parameters for lossy encoding with the given quality (0-100).
+    pub fn lossy(quality: u8) -> Self {
+        Self {
+            use_lossy: true,
+            lossy_quality: quality,
+            ..Self::default()
+        }
+    }
+}
+
 /// Encode image data losslessly with the indicated color type.
 ///
 /// # Panics
