@@ -733,6 +733,9 @@ pub(crate) struct Segment {
     pub(crate) quantizer_level: i8,
     pub(crate) loopfilter_level: i8,
 
+    /// The quantization index (0-127) for this segment
+    pub(crate) quant_index: u8,
+
     // Quantization matrices for trellis optimization
     pub(crate) y1_matrix: Option<VP8Matrix>,
     pub(crate) y2_matrix: Option<VP8Matrix>,

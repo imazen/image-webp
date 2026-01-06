@@ -7,16 +7,13 @@ use crate::vp8::Frame;
 use crate::vp8_arithmetic_encoder::ArithmeticEncoder;
 use crate::vp8_common::*;
 use crate::vp8_cost::{
-    self, assign_segments_kmeans, compute_segment_quant, estimate_dc16_cost,
-    estimate_residual_cost, rd_score_with_coeffs, record_coeffs, ProbaStats, TokenType,
-    FIXED_COSTS_I16, FIXED_COSTS_UV, LAMBDA_I16, LAMBDA_UV, MAX_ALPHA,
+    self, analyze_image, assign_segments_kmeans, compute_segment_quant, estimate_dc16_cost,
+    estimate_residual_cost, record_coeffs, ProbaStats, TokenType, FIXED_COSTS_I16, FIXED_COSTS_UV,
+    LAMBDA_I16, LAMBDA_UV,
 };
-// compute_mb_alpha is available for more accurate DCT-based analysis if needed
+// Intra4 imports for coefficient-level cost estimation (used in pick_best_intra4)
 #[allow(unused_imports)]
-use crate::vp8_cost::compute_mb_alpha;
-// Intra4 imports - for future coefficient-level cost estimation
-#[allow(unused_imports)]
-use crate::vp8_cost::{calc_i4_penalty, get_i4_mode_cost, LAMBDA_I4, VP8_FIXED_COSTS_I4};
+use crate::vp8_cost::{calc_i4_penalty, get_i4_mode_cost, rd_score_with_coeffs, LAMBDA_I4};
 use crate::vp8_prediction::*;
 use crate::yuv::convert_image_y;
 use crate::yuv::convert_image_yuv;
@@ -909,7 +906,11 @@ impl<W: Write> Vp8Encoder<W> {
         }
 
         // Y1 blocks (AC only for I16, DC+AC for I4)
-        let token_type = if is_i4 { TokenType::I4 } else { TokenType::I16AC };
+        let token_type = if is_i4 {
+            TokenType::I4
+        } else {
+            TokenType::I16AC
+        };
         let first_coeff = if is_i4 { 0 } else { 1 };
 
         for y in 0usize..4 {
@@ -961,7 +962,13 @@ impl<W: Write> Vp8Encoder<W> {
                 let top = self.top_complexity[mbx].u[x];
                 let complexity = (left + top).min(2);
 
-                record_coeffs(&zigzag, TokenType::Chroma, 0, complexity as usize, &mut self.proba_stats);
+                record_coeffs(
+                    &zigzag,
+                    TokenType::Chroma,
+                    0,
+                    complexity as usize,
+                    &mut self.proba_stats,
+                );
 
                 let has_coeffs = zigzag.iter().any(|&c| c != 0);
                 left = if has_coeffs { 1 } else { 0 };
@@ -987,7 +994,13 @@ impl<W: Write> Vp8Encoder<W> {
                 let top = self.top_complexity[mbx].v[x];
                 let complexity = (left + top).min(2);
 
-                record_coeffs(&zigzag, TokenType::Chroma, 0, complexity as usize, &mut self.proba_stats);
+                record_coeffs(
+                    &zigzag,
+                    TokenType::Chroma,
+                    0,
+                    complexity as usize,
+                    &mut self.proba_stats,
+                );
 
                 let has_coeffs = zigzag.iter().any(|&c| c != 0);
                 left = if has_coeffs { 1 } else { 0 };
@@ -1012,13 +1025,13 @@ impl<W: Write> Vp8Encoder<W> {
                         let update_prob = COEFF_UPDATE_PROBS[t][b][c][p];
 
                         let (should_update, new_p, savings) =
-                            self.proba_stats.should_update(t, b, c, p, old_prob, update_prob);
+                            self.proba_stats
+                                .should_update(t, b, c, p, old_prob, update_prob);
 
-                        // Only update if savings are significant enough
-                        // The signaling cost is approximately 9 bits (1 for flag + 8 for value)
-                        // We need at least 9*256 = 2304 savings in our units to break even
-                        // Add extra margin to account for estimation errors
-                        if should_update && savings > 3000 {
+                        // Update if savings are positive, matching libwebp's approach.
+                        // The signaling cost (8 bits for value + 1 bit flag) is already
+                        // included in the should_update calculation.
+                        if should_update && savings > 0 {
                             updated[t][b][c][p] = new_p;
                             total_savings += savings;
                             num_updates += 1;
@@ -1152,7 +1165,8 @@ impl<W: Write> Vp8Encoder<W> {
                         );
                     } else {
                         // Reset complexity for skipped blocks
-                        self.left_complexity.clear(macroblock_info.luma_mode != LumaMode::B);
+                        self.left_complexity
+                            .clear(macroblock_info.luma_mode != LumaMode::B);
                         self.top_complexity[usize::from(mbx)]
                             .clear(macroblock_info.luma_mode != LumaMode::B);
                     }
@@ -1243,13 +1257,15 @@ impl<W: Write> Vp8Encoder<W> {
     /// Tries all 4 modes (DC, V, H, TM) and picks the one with lowest RD cost:
     ///   RD_cost = SSE * 256 + (mode_cost + coeff_cost) * lambda
     ///
-    /// This balances distortion against the full bit cost including coefficient encoding.
+    /// This balances distortion against mode cost for comparison with Intra4.
     ///
-    /// Returns (best_mode, rd_score) for comparison against Intra4x4.
+    /// Uses libwebp's "RefineUsingDistortion" approach for fair I16 vs I4 comparison:
+    /// score = SSE * RD_DISTO_MULT + mode_cost * LAMBDA_I16 (106)
+    ///
+    /// Returns (best_mode, distortion_score) for comparison against Intra4x4.
     fn pick_best_intra16(&self, mbx: usize, mby: usize) -> (LumaMode, u64) {
         let mbw = usize::from(self.macroblock_width);
         let src_width = mbw * 16;
-        let segment = self.get_segment_for_mb(mbx, mby);
 
         // The 4 modes to try for 16x16 luma prediction (order matches FIXED_COSTS_I16)
         const MODES: [LumaMode; 4] = [LumaMode::DC, LumaMode::V, LumaMode::H, LumaMode::TM];
@@ -1277,15 +1293,10 @@ impl<W: Write> Vp8Encoder<W> {
             // Compute SSE between source and prediction
             let sse = sse_16x16_luma(&self.frame.ybuf, src_width, mbx, mby, &pred);
 
-            // Get DCT-transformed residual blocks
-            let luma_blocks = self.get_luma_blocks_from_predicted_16x16(&pred, mbx, mby);
-
-            // Estimate coefficient cost for this mode
-            let coeff_cost = self.estimate_luma16_coeff_cost(&luma_blocks, &segment);
-
-            // Compute RD cost with coefficient costs
+            // Compute distortion-only RD score (matching libwebp's RefineUsingDistortion)
+            // LAMBDA_I16 = 106 for I16 mode costs
             let mode_cost = FIXED_COSTS_I16[mode_idx];
-            let rd_score = rd_score_with_coeffs(sse, mode_cost, coeff_cost, LAMBDA_I16);
+            let rd_score = vp8_cost::rd_score(sse, mode_cost, LAMBDA_I16);
 
             if rd_score < best_rd_score {
                 best_rd_score = rd_score;
@@ -1393,17 +1404,26 @@ impl<W: Write> Vp8Encoder<W> {
         sse
     }
 
-    /// Select the best intra4x4 modes for all 16 subblocks using RD optimization.
+    /// Select the best intra4x4 modes for all 16 subblocks using distortion-based optimization.
     ///
-    /// This processes subblocks in raster order, reconstructing each subblock
-    /// after mode selection so that subsequent subblocks can use it as reference.
+    /// This uses libwebp's "RefineUsingDistortion" approach: compare I4 vs I16
+    /// based on distortion + mode costs only (no coefficient costs).
     ///
-    /// Returns (modes, total_sse, total_mode_cost, total_coeff_cost) for comparison against Intra16.
-    /// The caller will compute the final RD cost using these values.
+    /// Returns `Some((modes, rd_score))` if Intra4 is better than `i16_score`,
+    /// or `None` if Intra16 should be used (early-exit optimization).
     ///
-    /// Picks the best Intra4x4 mode for each subblock using RD cost.
-    #[allow(dead_code)] // Disabled: RD comparison causes file bloat; keeping for future improvements
-    fn pick_best_intra4(&self, mbx: usize, mby: usize) -> ([IntraMode; 16], u32, u32, u32) {
+    /// The comparison includes an i4_penalty (1000 * q²) to account for the
+    /// typically higher bit cost of Intra4 mode signaling.
+    ///
+    /// Note: Currently disabled in choose_macroblock_info() because our cost
+    /// estimation isn't accurate enough to make good I4 vs I16 decisions.
+    #[allow(dead_code)]
+    fn pick_best_intra4(
+        &self,
+        mbx: usize,
+        mby: usize,
+        i16_score: u64,
+    ) -> Option<([IntraMode; 16], u64)> {
         let mbw = usize::from(self.macroblock_width);
         let src_width = mbw * 16;
 
@@ -1423,15 +1443,24 @@ impl<W: Write> Vp8Encoder<W> {
 
         let mut best_modes = [IntraMode::DC; 16];
         let mut best_mode_indices = [0usize; 16]; // Track indices for context lookup
-        let mut total_sse = 0u32;
-        let mut total_mode_cost = 0u32;
-        let mut total_coeff_cost = 0u32;
 
         // Create working buffer with border
         let mut y_with_border =
             create_border_luma(mbx, mby, mbw, &self.top_border_y, &self.left_border_y);
 
         let segment = self.get_segment_for_mb(mbx, mby);
+
+        // Get quant index for i4_penalty calculation
+        let quant_index = segment.quant_index as u32;
+
+        // Start with i4_penalty to account for typically higher I4 mode signaling cost.
+        // This matches libwebp: i4_penalty = 1000 * q * q
+        let mut running_score = calc_i4_penalty(quant_index);
+
+        // Track total mode cost for header bit limiting
+        let mut total_mode_cost = 0u32;
+        // Maximum header bits for I4 modes (from libwebp: ~16 bits per block max)
+        let max_header_bits: u32 = 256 * 16 * 16 / 4; // Scaled down for reasonable limit
 
         // Process each subblock in raster order
         for sby in 0usize..4 {
@@ -1454,10 +1483,10 @@ impl<W: Write> Vp8Encoder<W> {
 
                 let mut best_mode = IntraMode::DC;
                 let mut best_mode_idx = 0usize;
-                let mut best_sse = u32::MAX;
-                let mut best_rd_cost = u64::MAX;
+                let mut best_block_score = u64::MAX;
 
-                // Try each mode and pick the best using RD cost
+                // Try each mode and pick the best using distortion + mode cost only
+                // (This matches libwebp's RefineUsingDistortion fast path)
                 for (mode_idx, &mode) in MODES.iter().enumerate() {
                     // Make a copy to test this mode
                     let mut test_buf = y_with_border;
@@ -1467,12 +1496,13 @@ impl<W: Write> Vp8Encoder<W> {
                     let sse = self.sse_4x4_subblock(&test_buf, mbx, mby, sbx, sby);
 
                     // Compute RD cost with context-dependent mode cost
+                    // Note: Using distortion-only scoring (no coefficient cost)
+                    // libwebp uses lambda_d_i4 = 11 for this
                     let mode_cost = get_i4_mode_cost(top_ctx, left_ctx, mode_idx);
-                    let rd_cost = vp8_cost::rd_score(sse, mode_cost, LAMBDA_I4);
+                    let rd_score = vp8_cost::rd_score(sse, mode_cost, LAMBDA_I4);
 
-                    if rd_cost < best_rd_cost {
-                        best_rd_cost = rd_cost;
-                        best_sse = sse;
+                    if rd_score < best_block_score {
+                        best_block_score = rd_score;
                         best_mode = mode;
                         best_mode_idx = mode_idx;
                     }
@@ -1480,14 +1510,26 @@ impl<W: Write> Vp8Encoder<W> {
 
                 best_modes[i] = best_mode;
                 best_mode_indices[i] = best_mode_idx;
-                total_sse += best_sse;
-                total_mode_cost += u32::from(get_i4_mode_cost(top_ctx, left_ctx, best_mode_idx));
+                let mode_cost = get_i4_mode_cost(top_ctx, left_ctx, best_mode_idx);
+                total_mode_cost += u32::from(mode_cost);
 
-                // Apply the selected mode to the working buffer
+                // Add this block's score to running total
+                running_score += best_block_score;
+
+                // Early-exit: if I4 already exceeds I16, bail out
+                if running_score >= i16_score {
+                    return None;
+                }
+
+                // Check header bit limit
+                if total_mode_cost > max_header_bits {
+                    return None;
+                }
+
+                // Apply the selected mode and reconstruct for next blocks
                 Self::apply_intra4_prediction(&mut y_with_border, best_mode, x0, y0);
 
                 // Reconstruct: compute residual, transform, quantize, dequantize, add back
-                // This is necessary so subsequent subblocks have correct reference pixels
                 let mut residual = [0i32; 16];
                 let src_base = (mby * 16 + sby * 4) * src_width + mbx * 16 + sbx * 4;
                 for y in 0..4 {
@@ -1499,21 +1541,9 @@ impl<W: Write> Vp8Encoder<W> {
                     }
                 }
 
-                // Transform
                 transform::dct4x4(&mut residual);
 
-                // For Intra4, use y1_matrix for full block (DC + AC)
-                // Note: Intra4 DC doesn't go to Y2, so we use y1_matrix's DC quantizer
                 let y1_matrix = segment.y1_matrix.as_ref().unwrap();
-
-                // Quantize and estimate coefficient cost
-                let mut quantized = [0i32; 16];
-                for (idx, val) in residual.iter().enumerate() {
-                    quantized[idx] = y1_matrix.quantize_coeff(*val, idx);
-                }
-
-                // Estimate coefficient cost for this block (includes DC for Intra4)
-                total_coeff_cost += estimate_residual_cost(&quantized, 0);
 
                 // Dequantize for reconstruction
                 for (idx, val) in residual.iter_mut().enumerate() {
@@ -1521,15 +1551,13 @@ impl<W: Write> Vp8Encoder<W> {
                     *val = y1_matrix.dequantize(level, idx);
                 }
 
-                // Inverse transform
                 transform::idct4x4(&mut residual);
-
-                // Add residue back to get reconstructed pixels
                 add_residue(&mut y_with_border, &residual, y0, x0, LUMA_STRIDE);
             }
         }
 
-        (best_modes, total_sse, total_mode_cost, total_coeff_cost)
+        // I4 wins! Return the modes and final score
+        Some((best_modes, running_score))
     }
 
     /// Select the best chroma prediction mode using RD (rate-distortion) cost.
@@ -1594,9 +1622,21 @@ impl<W: Write> Vp8Encoder<W> {
 
     fn choose_macroblock_info(&self, mbx: usize, mby: usize) -> MacroblockInfo {
         // Pick the best 16x16 luma mode using RD cost selection
-        // Note: Intra4 mode is disabled - RD comparison causes file bloat at all quality levels.
-        // With VP8Matrix, we achieve 123% of libwebp's SSIMULACRA2 using only Intra16 mode.
-        let (luma_mode, _rd_score) = self.pick_best_intra16(mbx, mby);
+        let (luma_mode, _i16_score) = self.pick_best_intra16(mbx, mby);
+
+        // Note: Intra4 mode is disabled for now because our cost estimation
+        // isn't accurate enough to make good I4 vs I16 decisions. The mode
+        // signaling overhead for I4 (16 mode values) often exceeds the
+        // distortion savings, leading to larger files.
+        //
+        // TODO: Enable Intra4 when we have better coefficient cost estimation
+        // (e.g., ported VP8GetCostLuma4 with remapped_costs tables).
+        //
+        // To enable: uncomment the following:
+        // let (luma_mode, luma_bpred) = match self.pick_best_intra4(mbx, mby, _i16_score) {
+        //     Some((modes, _)) => (LumaMode::B, Some(modes)),
+        //     None => (luma_mode, None),
+        // };
         let luma_bpred = None;
 
         // Pick the best chroma mode using RD-based selection
@@ -1633,78 +1673,39 @@ impl<W: Write> Vp8Encoder<W> {
 
     /// Analyze image complexity and assign macroblocks to segments.
     ///
-    /// This performs a fast analysis pass to:
-    /// 1. Compute "alpha" (compressibility) for each macroblock
+    /// This performs a DCT-based analysis pass (ported from libwebp) to:
+    /// 1. Compute "alpha" (compressibility) for each macroblock using DCT histogram
     /// 2. Build a histogram of alpha values
     /// 3. Use k-means clustering to assign macroblocks to 4 segments
     /// 4. Configure per-segment quantization based on alpha
     ///
     /// Segments allow different quantization for different image regions:
-    /// - Flat areas (high alpha) can use more aggressive quantization
+    /// - Flat areas (high alpha from segment perspective) can use more aggressive quantization
     /// - Textured areas (low alpha) need finer quantization to preserve detail
+    ///
+    /// Ported from libwebp's VP8EncAnalyze / MBAnalyze.
     fn analyze_and_assign_segments(&mut self, base_quant_index: u8) {
-        let mb_width = usize::from(self.macroblock_width);
-        let mb_height = usize::from(self.macroblock_height);
-        let total_mbs = mb_width * mb_height;
+        let y_stride = usize::from(self.macroblock_width * 16);
+        let uv_stride = usize::from(self.macroblock_width * 8);
+        let width = usize::from(self.frame.width);
+        let height = usize::from(self.frame.height);
 
-        // First pass: compute alpha for each macroblock using DC prediction
-        let mut mb_alphas = vec![0u8; total_mbs];
-        let mut alpha_histogram = [0u32; 256];
-
-        let width = usize::from(self.macroblock_width * 16);
-
-        for mby in 0..mb_height {
-            for mbx in 0..mb_width {
-                // For speed, we use a simplified alpha calculation based on pixel variance
-                // instead of the full DCT-based analysis (compute_mb_alpha).
-
-                // Get the raw pixel variance as a proxy for complexity
-                let src_base = mby * 16 * width + mbx * 16;
-                let mut sum: i64 = 0;
-                let mut sum_sq: i64 = 0;
-
-                for y in 0..16 {
-                    for x in 0..16 {
-                        let idx = src_base + y * width + x;
-                        let pixel = self.frame.ybuf[idx] as i64;
-                        sum += pixel;
-                        sum_sq += pixel * pixel;
-                    }
-                }
-
-                // Variance = E[X²] - E[X]²
-                let mean = sum / 256;
-                let variance = (sum_sq / 256 - mean * mean).max(0) as u32;
-
-                // Map variance to alpha: high variance = complex = low alpha
-                // Low variance = flat = high alpha
-                // Scale variance to [0, MAX_ALPHA] range, inverting it
-                let variance_scaled = (variance.min(16384) * 255 / 16384) as u8;
-                let alpha = MAX_ALPHA - variance_scaled;
-
-                // Store alpha and build histogram
-                let mb_idx = mby * mb_width + mbx;
-                mb_alphas[mb_idx] = alpha;
-                alpha_histogram[alpha as usize] += 1;
-            }
-        }
+        // Run full DCT-based analysis pass using libwebp-compatible algorithm
+        // This tests DC and TM modes for I16 and UV, computes per-MB alpha,
+        // and builds the alpha histogram
+        let (mb_alphas, alpha_histogram) = analyze_image(
+            &self.frame.ybuf,
+            &self.frame.ubuf,
+            &self.frame.vbuf,
+            width,
+            height,
+            y_stride,
+            uv_stride,
+        );
 
         // Use k-means to assign segments (4 segments)
-        let (centers, alpha_to_segment) = assign_segments_kmeans(&alpha_histogram, 4);
-
-        // Compute weighted average alpha (mid-point for quantization adjustment)
-        // This matches libwebp's weighted_average computation in AssignSegments
-        let mut total_weighted = 0u64;
-        let mut total_count = 0u64;
-        for (alpha, &count) in alpha_histogram.iter().enumerate() {
-            total_weighted += alpha as u64 * count as u64;
-            total_count += count as u64;
-        }
-        let mid_alpha = if total_count > 0 {
-            (total_weighted / total_count) as i32
-        } else {
-            128
-        };
+        // weighted_average is computed from final cluster centers, matching libwebp
+        let (centers, alpha_to_segment, mid_alpha) = assign_segments_kmeans(&alpha_histogram, 4);
 
         // Find min and max of centers for alpha transformation
         // This matches libwebp's SetSegmentAlphas
@@ -1749,6 +1750,7 @@ impl<W: Write> Vp8Encoder<W> {
                 uvdc: DC_QUANT[seg_quant_usize],
                 uvac: AC_QUANT[seg_quant_usize],
                 quantizer_level: delta,
+                quant_index: seg_quant_index,
                 ..Default::default()
             };
             segment.init_matrices();
@@ -1758,6 +1760,11 @@ impl<W: Write> Vp8Encoder<W> {
         // Enable segment-based encoding
         self.segments_enabled = true;
         self.segments_update_map = true;
+
+        // Reset borders for actual encoding pass
+        self.left_border_y = [129u8; 16 + 1];
+        self.left_border_u = [129u8; 8 + 1];
+        self.left_border_v = [129u8; 8 + 1];
     }
 
     // sets up the encoding of the encoder by setting all the encoder params based on the width and height
@@ -1836,26 +1843,28 @@ impl<W: Write> Vp8Encoder<W> {
                 uvdc: DC_QUANT[quant_index_usize],
                 uvac: AC_QUANT[quant_index_usize],
                 quantizer_level: 0, // No delta for base segment
+                quant_index,
                 ..Default::default()
             };
             segment.init_matrices();
             self.segments[seg_idx] = segment;
         }
 
-        // Segment-based quantization: currently disabled as it hurts compression.
-        // Our simplified variance-based segment analysis adds overhead without
-        // providing enough benefit. libwebp uses DCT histogram analysis which
-        // is more effective at identifying compressibility.
-        // TODO: Implement DCT-based alpha calculation (compute_mb_alpha) for better results.
+        // Segment-based quantization using DCT histogram analysis (ported from libwebp).
+        // This allows different quantization for different image regions:
+        // - Flat areas get more aggressive quantization
+        // - Textured areas get finer quantization
+        //
+        // Only enable for images large enough to benefit (overhead vs gain tradeoff).
+        // libwebp uses segments for images with method > 0 and multiple segments configured.
         let total_mbs = usize::from(mb_width) * usize::from(mb_height);
-        let use_segments = false; // Disabled: adds ~10% to file size
-        let _ = total_mbs; // suppress unused warning
+        let use_segments = total_mbs >= 256; // Enable for images >= 256 macroblocks (~256x256)
 
         if use_segments {
-            // This will reconfigure segments with per-region quantization
+            // DCT-based segment analysis and assignment
             self.analyze_and_assign_segments(quant_index);
         } else {
-            // Disable segments for small images
+            // Disable segments for small images (overhead not worth it)
             self.segments_enabled = false;
             self.segments_update_map = false;
             self.segment_map = Vec::new();
@@ -2306,8 +2315,10 @@ impl<W: Write> Vp8Encoder<W> {
         let u_coeffs = self.get_chroma_block_coeffs(u_blocks, segment);
         let v_coeffs = self.get_chroma_block_coeffs(v_blocks, segment);
 
-        let quantized_u_residue = self.get_dequantized_blocks_from_coeffs_chroma(&u_coeffs, segment);
-        let quantized_v_residue = self.get_dequantized_blocks_from_coeffs_chroma(&v_coeffs, segment);
+        let quantized_u_residue =
+            self.get_dequantized_blocks_from_coeffs_chroma(&u_coeffs, segment);
+        let quantized_v_residue =
+            self.get_dequantized_blocks_from_coeffs_chroma(&v_coeffs, segment);
 
         for y in 0usize..2 {
             for x in 0usize..2 {

@@ -16,8 +16,8 @@ Premature benchmarking wastes time because:
 **Remaining work before benchmarking:**
 - [x] ~~Enable and tune segment-based quantization~~ - **DONE**: Full DCT-based analysis ported from libwebp
 - [x] ~~Implement optimal loop filter level selection~~ - **DONE**: `compute_filter_level()` ported from libwebp
-- [ ] Fix Intra4 mode with proper cost estimation (currently disabled)
-- [ ] Tune probability update thresholds with full system
+- [x] ~~Tune probability update thresholds~~ - **DONE**: Changed to `savings > 0` matching libwebp exactly
+- [ ] Fix Intra4 mode with proper cost estimation (implementation improved but still disabled)
 
 **When to benchmark:** After all the above are complete and integrated.
 
@@ -101,7 +101,13 @@ Premature benchmarking wastes time because:
   - [x] Per-segment quantization computation (compute_segment_quant)
 
 ### Disabled/Incomplete
-- [ ] Intra4 mode (implemented but disabled - causes file bloat due to inaccurate cost estimation)
+- [ ] Intra4 mode - Implementation improved with:
+  - [x] i4_penalty = 1000 * q² matching libwebp
+  - [x] Early-exit when I4 score exceeds I16 score
+  - [x] Header bit limiting
+  - [x] libwebp-style distortion-only comparison (RefineUsingDistortion approach)
+  - [ ] Still disabled because mode signaling overhead exceeds distortion savings
+  - [ ] Needs VP8GetCostLuma4 with remapped_costs for accurate coefficient cost estimation
 
 ### Not Implemented (Optional/Minor)
 - [ ] SmoothSegmentMap - Optional post-processing when `preprocessing & 1` is set
