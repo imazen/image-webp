@@ -6,10 +6,13 @@ use crate::transform;
 use crate::vp8::Frame;
 use crate::vp8_arithmetic_encoder::ArithmeticEncoder;
 use crate::vp8_common::*;
-use crate::vp8_cost::{self, FIXED_COSTS_I16, FIXED_COSTS_UV, LAMBDA_I16, LAMBDA_UV};
-// Intra4 imports - kept for future coefficient-level cost estimation
+use crate::vp8_cost::{
+    self, estimate_dc16_cost, estimate_residual_cost, rd_score_with_coeffs, FIXED_COSTS_I16,
+    FIXED_COSTS_UV, LAMBDA_I16, LAMBDA_UV,
+};
+// Intra4 imports - for future coefficient-level cost estimation
 #[allow(unused_imports)]
-use crate::vp8_cost::{FIXED_COSTS_I4, INTRA4_PENALTY, LAMBDA_I4};
+use crate::vp8_cost::{calc_i4_penalty, get_i4_mode_cost, LAMBDA_I4, VP8_FIXED_COSTS_I4};
 use crate::vp8_prediction::*;
 use crate::yuv::convert_image_y;
 use crate::yuv::convert_image_yuv;
@@ -755,17 +758,18 @@ impl<W: Write> Vp8Encoder<W> {
         Ok(())
     }
 
-    /// Select the best 16x16 luma prediction mode using RD (rate-distortion) cost.
+    /// Select the best 16x16 luma prediction mode using full RD (rate-distortion) cost.
     ///
     /// Tries all 4 modes (DC, V, H, TM) and picks the one with lowest RD cost:
-    ///   RD_cost = SSE * 256 + mode_cost * lambda
+    ///   RD_cost = SSE * 256 + (mode_cost + coeff_cost) * lambda
     ///
-    /// This balances distortion against the bit cost of signaling the mode.
+    /// This balances distortion against the full bit cost including coefficient encoding.
     ///
     /// Returns (best_mode, rd_score) for comparison against Intra4x4.
     fn pick_best_intra16(&self, mbx: usize, mby: usize) -> (LumaMode, u64) {
         let mbw = usize::from(self.macroblock_width);
         let src_width = mbw * 16;
+        let segment = self.segments[0];
 
         // The 4 modes to try for 16x16 luma prediction (order matches FIXED_COSTS_I16)
         const MODES: [LumaMode; 4] = [LumaMode::DC, LumaMode::V, LumaMode::H, LumaMode::TM];
@@ -793,9 +797,15 @@ impl<W: Write> Vp8Encoder<W> {
             // Compute SSE between source and prediction
             let sse = sse_16x16_luma(&self.frame.ybuf, src_width, mbx, mby, &pred);
 
-            // Compute RD cost: SSE * 256 + mode_cost * lambda
+            // Get DCT-transformed residual blocks
+            let luma_blocks = self.get_luma_blocks_from_predicted_16x16(&pred, mbx, mby);
+
+            // Estimate coefficient cost for this mode
+            let coeff_cost = self.estimate_luma16_coeff_cost(&luma_blocks, &segment);
+
+            // Compute RD cost with coefficient costs
             let mode_cost = FIXED_COSTS_I16[mode_idx];
-            let rd_score = vp8_cost::rd_score(sse, mode_cost, LAMBDA_I16);
+            let rd_score = rd_score_with_coeffs(sse, mode_cost, coeff_cost, LAMBDA_I16);
 
             if rd_score < best_rd_score {
                 best_rd_score = rd_score;
@@ -804,6 +814,51 @@ impl<W: Write> Vp8Encoder<W> {
         }
 
         (best_mode, best_rd_score)
+    }
+
+    /// Estimate coefficient cost for a 16x16 luma macroblock (I16 mode).
+    ///
+    /// Quantizes coefficients and estimates their encoding cost without
+    /// permanently modifying state.
+    fn estimate_luma16_coeff_cost(&self, luma_blocks: &[i32; 256], segment: &Segment) -> u32 {
+        let mut total_cost = 0u32;
+
+        // Extract DC coefficients and estimate Y2 (DC transform) cost
+        let mut dc_coeffs = [0i32; 16];
+        for (i, dc) in dc_coeffs.iter_mut().enumerate() {
+            *dc = luma_blocks[i * 16];
+        }
+
+        // WHT transform on DC coefficients
+        let mut y2_coeffs = dc_coeffs;
+        transform::wht4x4(&mut y2_coeffs);
+
+        // Quantize Y2 coefficients and estimate cost
+        for (idx, coeff) in y2_coeffs.iter_mut().enumerate() {
+            let quant = if idx > 0 { segment.y2ac } else { segment.y2dc };
+            *coeff /= i32::from(quant);
+        }
+        total_cost += estimate_dc16_cost(&y2_coeffs);
+
+        // Estimate AC coefficient cost for each 4x4 block (skip DC at index 0)
+        for block_idx in 0..16 {
+            let block_start = block_idx * 16;
+            let mut block = [0i32; 16];
+
+            // Copy and quantize AC coefficients (DC is handled separately in I16 mode)
+            for (i, coeff) in block.iter_mut().enumerate() {
+                if i == 0 {
+                    *coeff = 0; // DC is in Y2 block
+                } else {
+                    *coeff = luma_blocks[block_start + i] / i32::from(segment.yac);
+                }
+            }
+
+            // Estimate cost (starting from position 1, DC is separate)
+            total_cost += estimate_residual_cost(&block, 1);
+        }
+
+        total_cost
     }
 
     /// Apply a 4x4 intra prediction mode to the working buffer
@@ -888,6 +943,7 @@ impl<W: Write> Vp8Encoder<W> {
         ];
 
         let mut best_modes = [IntraMode::DC; 16];
+        let mut best_mode_indices = [0usize; 16]; // Track indices for context lookup
         let mut total_sse = 0u32;
         let mut total_mode_cost = 0u32;
 
@@ -904,6 +960,18 @@ impl<W: Write> Vp8Encoder<W> {
                 let y0 = sby * 4 + 1;
                 let x0 = sbx * 4 + 1;
 
+                // Get context from neighboring blocks (DC=0 if at edge)
+                let top_ctx = if sby == 0 {
+                    0 // DC mode
+                } else {
+                    best_mode_indices[(sby - 1) * 4 + sbx]
+                };
+                let left_ctx = if sbx == 0 {
+                    0 // DC mode
+                } else {
+                    best_mode_indices[sby * 4 + (sbx - 1)]
+                };
+
                 let mut best_mode = IntraMode::DC;
                 let mut best_mode_idx = 0usize;
                 let mut best_sse = u32::MAX;
@@ -918,8 +986,8 @@ impl<W: Write> Vp8Encoder<W> {
                     // Compute SSE for this subblock
                     let sse = self.sse_4x4_subblock(&test_buf, mbx, mby, sbx, sby);
 
-                    // Compute RD cost for this mode (using LAMBDA_I4 for internal selection)
-                    let mode_cost = FIXED_COSTS_I4[mode_idx];
+                    // Compute RD cost with context-dependent mode cost
+                    let mode_cost = get_i4_mode_cost(top_ctx, left_ctx, mode_idx);
                     let rd_cost = vp8_cost::rd_score(sse, mode_cost, LAMBDA_I4);
 
                     if rd_cost < best_rd_cost {
@@ -931,8 +999,9 @@ impl<W: Write> Vp8Encoder<W> {
                 }
 
                 best_modes[i] = best_mode;
+                best_mode_indices[i] = best_mode_idx;
                 total_sse += best_sse;
-                total_mode_cost += u32::from(FIXED_COSTS_I4[best_mode_idx]);
+                total_mode_cost += u32::from(get_i4_mode_cost(top_ctx, left_ctx, best_mode_idx));
 
                 // Apply the selected mode to the working buffer
                 Self::apply_intra4_prediction(&mut y_with_border, best_mode, x0, y0);
