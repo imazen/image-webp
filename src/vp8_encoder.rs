@@ -1145,10 +1145,23 @@ impl<W: Write> Vp8Encoder<W> {
         u_buf: Vec<u8>,
         v_buf: Vec<u8>,
     ) {
+        // choosing the quantization quality based on the quality passed in
+        if lossy_quality > 100 {
+            panic!("lossy quality must be between 0 and 100");
+        }
+
+        let quant_index: u8 = (127 - u16::from(lossy_quality) * 127 / 100) as u8;
+        let quant_index_usize: usize = quant_index as usize;
+
         let mb_width = width.div_ceil(16);
         let mb_height = height.div_ceil(16);
         self.macroblock_width = mb_width;
         self.macroblock_height = mb_height;
+
+        // Use maximum filter level - our simple encoder produces more artifacts
+        // than libwebp, so aggressive filtering helps quality
+        let filter_level = 63u8;
+
         self.frame = Frame {
             width,
             height,
@@ -1163,8 +1176,8 @@ impl<W: Write> Vp8Encoder<W> {
             pixel_type: 0,
 
             filter_type: false,
-            filter_level: 63,
-            sharpness_level: 7,
+            filter_level,
+            sharpness_level: 7, // Higher values preserve edges better
         };
 
         self.top_complexity = vec![Complexity::default(); usize::from(mb_width)];
@@ -1172,14 +1185,6 @@ impl<W: Write> Vp8Encoder<W> {
         self.left_b_pred = [IntraMode::default(); 4];
 
         self.token_probs = COEFF_PROBS;
-
-        // choosing the quantization quality based on the quality passed in
-        if lossy_quality > 100 {
-            panic!("lossy quality must be between 0 and 100");
-        }
-
-        let quant_index: u8 = (127 - u16::from(lossy_quality) * 127 / 100) as u8;
-        let quant_index_usize: usize = quant_index as usize;
 
         self.segments_enabled = false;
         let quantization_indices = QuantizationIndices {
