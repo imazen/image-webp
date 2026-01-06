@@ -349,6 +349,103 @@ pub fn quantdiv(coeff: u32, iq: u32, bias: u32) -> i32 {
 }
 
 //------------------------------------------------------------------------------
+// Filter strength calculation
+//
+// Ported from libwebp src/enc/filter_enc.c
+// This table maps (sharpness, delta) to minimum filter strength needed.
+
+/// Maximum delta size for filter strength lookup
+const MAX_DELTA_SIZE: usize = 64;
+
+/// Filter strength lookup table: [sharpness][delta] -> filter_level
+/// This gives, for a given sharpness, the filtering strength to be
+/// used (at least) in order to filter a given edge step delta.
+/// Ported from libwebp's kLevelsFromDelta.
+#[rustfmt::skip]
+const LEVELS_FROM_DELTA: [[u8; MAX_DELTA_SIZE]; 8] = [
+    [0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15,
+     16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+     32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
+     48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63],
+    [0,  1,  2,  3,  5,  6,  7,  8,  9,  11, 12, 13, 14, 15, 17, 18,
+     20, 21, 23, 24, 26, 27, 29, 30, 32, 33, 35, 36, 38, 39, 41, 42,
+     44, 45, 47, 48, 50, 51, 53, 54, 56, 57, 59, 60, 62, 63, 63, 63,
+     63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63],
+    [0,  1,  2,  3,  5,  6,  7,  8,  9,  11, 12, 13, 14, 16, 17, 19,
+     20, 22, 23, 25, 26, 28, 29, 31, 32, 34, 35, 37, 38, 40, 41, 43,
+     44, 46, 47, 49, 50, 52, 53, 55, 56, 58, 59, 61, 62, 63, 63, 63,
+     63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63],
+    [0,  1,  2,  3,  5,  6,  7,  8,  9,  11, 12, 13, 15, 16, 18, 19,
+     21, 22, 24, 25, 27, 28, 30, 31, 33, 34, 36, 37, 39, 40, 42, 43,
+     45, 46, 48, 49, 51, 52, 54, 55, 57, 58, 60, 61, 63, 63, 63, 63,
+     63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63],
+    [0,  1,  2,  3,  5,  6,  7,  8,  9,  11, 12, 14, 15, 17, 18, 20,
+     21, 23, 24, 26, 27, 29, 30, 32, 33, 35, 36, 38, 39, 41, 42, 44,
+     45, 47, 48, 50, 51, 53, 54, 56, 57, 59, 60, 62, 63, 63, 63, 63,
+     63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63],
+    [0,  1,  2,  4,  5,  7,  8,  9,  11, 12, 13, 15, 16, 17, 19, 20,
+     22, 23, 25, 26, 28, 29, 31, 32, 34, 35, 37, 38, 40, 41, 43, 44,
+     46, 47, 49, 50, 52, 53, 55, 56, 58, 59, 61, 62, 63, 63, 63, 63,
+     63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63],
+    [0,  1,  2,  4,  5,  7,  8,  9,  11, 12, 13, 15, 16, 18, 19, 21,
+     22, 24, 25, 27, 28, 30, 31, 33, 34, 36, 37, 39, 40, 42, 43, 45,
+     46, 48, 49, 51, 52, 54, 55, 57, 58, 60, 61, 63, 63, 63, 63, 63,
+     63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63],
+    [0,  1,  2,  4,  5,  7,  8,  9,  11, 12, 14, 15, 17, 18, 20, 21,
+     23, 24, 26, 27, 29, 30, 32, 33, 35, 36, 38, 39, 41, 42, 44, 45,
+     47, 48, 50, 51, 53, 54, 56, 57, 59, 60, 62, 63, 63, 63, 63, 63,
+     63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63],
+];
+
+/// Cutoff for very small filter strengths (have close to no visual effect)
+const FSTRENGTH_CUTOFF: u8 = 2;
+
+/// Calculate filter strength from sharpness and edge delta.
+/// Ported from libwebp's VP8FilterStrengthFromDelta.
+#[inline]
+pub fn filter_strength_from_delta(sharpness: u8, delta: u8) -> u8 {
+    let pos = (delta as usize).min(MAX_DELTA_SIZE - 1);
+    let sharpness_idx = (sharpness as usize).min(7);
+    LEVELS_FROM_DELTA[sharpness_idx][pos]
+}
+
+/// Calculate optimal filter level based on quantizer and sharpness.
+///
+/// This implements libwebp's SetupFilterStrength logic:
+/// 1. Compute qstep from AC quantizer
+/// 2. Get base strength from delta table
+/// 3. Scale by filter_strength config (default 50 = mid-filtering)
+///
+/// # Arguments
+/// * `quant_index` - Quantizer index (0-127)
+/// * `sharpness` - Sharpness level (0-7)
+/// * `filter_strength` - User filter strength (0-100), default 50
+pub fn compute_filter_level(quant_index: u8, sharpness: u8, filter_strength: u8) -> u8 {
+    // level0 is in [0..500]. Using filter_strength=50 as mid-filtering.
+    let level0 = 5 * filter_strength as u32;
+
+    // Get AC quantizer step from the quant table and divide by 4
+    let qstep = (VP8_AC_TABLE[quant_index as usize] >> 2) as u8;
+
+    // Get base strength from delta table
+    let base_strength = filter_strength_from_delta(sharpness, qstep) as u32;
+
+    // Scale by level0 / 256 (simplified: we don't have per-segment beta)
+    // In libwebp: f = base_strength * level0 / (256 + beta)
+    // With beta=0, this simplifies to: f = base_strength * level0 / 256
+    let f = (base_strength * level0) / 256;
+
+    // Clamp to valid range and apply cutoff
+    if f < FSTRENGTH_CUTOFF as u32 {
+        0
+    } else if f > 63 {
+        63
+    } else {
+        f as u8
+    }
+}
+
+//------------------------------------------------------------------------------
 // Mode costs
 
 /// Fixed mode costs for Intra16 modes (DC, V, H, TM)
@@ -1027,6 +1124,424 @@ pub fn rd_score_with_coeffs(sse: u32, mode_cost: u16, coeff_cost: u32, lambda: u
 #[inline]
 pub fn get_i4_mode_cost(top: usize, left: usize, mode: usize) -> u16 {
     VP8_FIXED_COSTS_I4[top][left][mode]
+}
+
+//------------------------------------------------------------------------------
+// Token Statistics for Adaptive Probabilities
+//
+// Ported from libwebp src/enc/cost_enc.h and src/enc/frame_enc.c
+// This enables two-pass encoding with optimal probability updates.
+
+/// Number of coefficient types (DCT types: 0=i16-DC, 1=i16-AC, 2=chroma, 3=i4)
+pub const NUM_TYPES: usize = 4;
+/// Number of bands for coefficient encoding
+pub const NUM_BANDS: usize = 8;
+/// Number of contexts (0=zero, 1=one, 2=more)
+pub const NUM_CTX: usize = 3;
+/// Number of probabilities per context node
+pub const NUM_PROBAS: usize = 11;
+
+/// Token statistics for computing optimal probabilities.
+/// Format: upper 16 bits = total count, lower 16 bits = count of 1s.
+/// Ported from libwebp's proba_t type.
+#[derive(Clone, Default)]
+pub struct ProbaStats {
+    /// Statistics array: [type][band][context][proba_node]
+    pub stats: [[[[u32; NUM_PROBAS]; NUM_CTX]; NUM_BANDS]; NUM_TYPES],
+}
+
+impl ProbaStats {
+    /// Create new empty statistics
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Reset all statistics to zero
+    pub fn reset(&mut self) {
+        for t in self.stats.iter_mut() {
+            for b in t.iter_mut() {
+                for c in b.iter_mut() {
+                    for p in c.iter_mut() {
+                        *p = 0;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Record a bit value for a specific probability node.
+    /// Ported from libwebp's VP8RecordStats.
+    #[inline]
+    pub fn record(&mut self, t: usize, b: usize, c: usize, p: usize, bit: bool) {
+        let stats = &mut self.stats[t][b][c][p];
+        // Check for overflow (at 0xfffe0000)
+        if *stats >= 0xfffe_0000 {
+            // Divide stats by 2 to prevent overflow
+            *stats = ((*stats + 1) >> 1) & 0x7fff_7fff;
+        }
+        // Record: lower 16 bits = count of 1s, upper 16 bits = total count
+        *stats += 0x0001_0000 + if bit { 1 } else { 0 };
+    }
+
+    /// Get the optimal probability for a node based on accumulated statistics.
+    /// Returns 255 - (nb * 255 / total) where nb = count of 1s.
+    pub fn calc_proba(&self, t: usize, b: usize, c: usize, p: usize) -> u8 {
+        let stats = self.stats[t][b][c][p];
+        let nb = (stats & 0xffff) as u32; // count of 1s
+        let total = (stats >> 16) as u32; // total count
+        if total == 0 {
+            return 255;
+        }
+        let proba = 255 - (nb * 255 / total);
+        proba as u8
+    }
+
+    /// Calculate the cost of updating vs keeping old probability.
+    /// Returns (should_update, new_prob, bit_savings).
+    pub fn should_update(
+        &self,
+        t: usize,
+        b: usize,
+        c: usize,
+        p: usize,
+        old_proba: u8,
+        update_proba: u8,
+    ) -> (bool, u8, i32) {
+        let stats = self.stats[t][b][c][p];
+        let nb = (stats & 0xffff) as i32; // count of 1s
+        let total = (stats >> 16) as i32; // total count
+
+        if total == 0 {
+            return (false, old_proba, 0);
+        }
+
+        let new_p = self.calc_proba(t, b, c, p);
+
+        // Cost with old probability
+        let old_cost = branch_cost(nb, total, old_proba) + vp8_bit_cost(false, update_proba) as i32;
+
+        // Cost with new probability (includes signaling cost)
+        let new_cost = branch_cost(nb, total, new_p)
+            + vp8_bit_cost(true, update_proba) as i32
+            + 8 * 256; // 8 bits to signal new probability value
+
+        let savings = old_cost - new_cost;
+        (savings > 0, new_p, savings)
+    }
+}
+
+/// Calculate the branch cost for a given count distribution and probability.
+/// Cost = nb * cost(1|p) + (total - nb) * cost(0|p)
+#[inline]
+fn branch_cost(nb: i32, total: i32, proba: u8) -> i32 {
+    let cost_1 = VP8_ENTROPY_COST[255 - proba as usize] as i32;
+    let cost_0 = VP8_ENTROPY_COST[proba as usize] as i32;
+    nb * cost_1 + (total - nb) * cost_0
+}
+
+/// Token type for coefficient encoding
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TokenType {
+    /// I16 DC coefficients (Y2/WHT)
+    I16DC = 0,
+    /// I16 AC coefficients (Y1 blocks with DC=0)
+    I16AC = 1,
+    /// Chroma (UV) coefficients
+    Chroma = 2,
+    /// I4 coefficients
+    I4 = 3,
+}
+
+/// Record coefficient tokens for probability statistics.
+/// Ported from libwebp's VP8RecordCoeffs.
+///
+/// # Arguments
+/// * `coeffs` - Quantized coefficients in zigzag order (16 values)
+/// * `token_type` - Type of coefficients (I16DC, I16AC, Chroma, I4)
+/// * `first` - First coefficient to process (0 or 1)
+/// * `ctx` - Initial context (0, 1, or 2)
+/// * `stats` - Statistics accumulator
+pub fn record_coeffs(
+    coeffs: &[i32],
+    token_type: TokenType,
+    first: usize,
+    ctx: usize,
+    stats: &mut ProbaStats,
+) {
+    let t = token_type as usize;
+    let mut n = first;
+    let mut context = ctx;
+
+    // Find last non-zero coefficient
+    let last = coeffs.iter().rposition(|&c| c != 0).map(|i| i as i32).unwrap_or(-1);
+
+    // Record EOB token if no coefficients
+    let band = VP8_ENC_BANDS[n] as usize;
+    stats.record(t, band, context, 0, last >= n as i32);
+    if last < n as i32 {
+        return;
+    }
+
+    while n < 16 {
+        let c = coeffs[n];
+        let band = VP8_ENC_BANDS[n] as usize;
+        n += 1;
+
+        let sign = c < 0;
+        let v = if sign { -c } else { c } as u32;
+
+        if v == 0 {
+            // Zero coefficient
+            stats.record(t, band, context, 1, false);
+            context = 0;
+            continue;
+        }
+
+        // Non-zero coefficient
+        stats.record(t, band, context, 1, true);
+
+        if v == 1 {
+            stats.record(t, band, context, 2, false);
+            context = 1;
+        } else {
+            stats.record(t, band, context, 2, true);
+
+            if v <= 4 {
+                stats.record(t, band, context, 3, false);
+                if v == 2 {
+                    stats.record(t, band, context, 4, false);
+                } else {
+                    stats.record(t, band, context, 4, true);
+                    stats.record(t, band, context, 5, v == 4);
+                }
+            } else if v <= 10 {
+                stats.record(t, band, context, 3, true);
+                stats.record(t, band, context, 6, false);
+                stats.record(t, band, context, 7, v > 6);
+            } else {
+                stats.record(t, band, context, 3, true);
+                stats.record(t, band, context, 6, true);
+
+                if v <= 2 + (8 << 2) {
+                    stats.record(t, band, context, 8, false);
+                    stats.record(t, band, context, 9, v > 2 + (8 << 1));
+                } else {
+                    stats.record(t, band, context, 8, true);
+                    stats.record(t, band, context, 10, v > 2 + (8 << 3));
+                }
+            }
+
+            context = 2;
+        }
+    }
+
+    // Record trailing EOB if we didn't process all 16 coefficients
+    if n < 16 {
+        let band = VP8_ENC_BANDS[n] as usize;
+        stats.record(t, band, context, 0, false);
+    }
+}
+
+//------------------------------------------------------------------------------
+// Segment-based quantization
+//
+// Ported from libwebp src/enc/analysis_enc.c
+// Allows different quantization levels for different image regions.
+
+/// Maximum alpha value for macroblock complexity
+pub const MAX_ALPHA: u8 = 255;
+
+/// Alpha scale factor
+const ALPHA_SCALE: u32 = 2 * MAX_ALPHA as u32;
+
+/// Number of k-means iterations for segment assignment
+const MAX_ITERS_K_MEANS: usize = 6;
+
+/// Number of segments
+pub const NUM_SEGMENTS: usize = 4;
+
+/// Compute "alpha" value from a 16x16 block of DCT coefficients.
+///
+/// Alpha measures the compressibility of a macroblock:
+/// - Higher alpha = easier to compress (flat areas)
+/// - Lower alpha = harder to compress (textured areas)
+///
+/// Ported from libwebp's GetAlpha/VP8CollectHistogram.
+pub fn compute_mb_alpha(dct_coeffs: &[i32; 256]) -> u8 {
+    let mut max_value: i32 = 0;
+    let mut last_non_zero: usize = 1;
+
+    // Collect histogram of coefficient magnitudes
+    // Skip DC (index 0 of each 4x4 block)
+    for block_idx in 0..16 {
+        let block_start = block_idx * 16;
+        for (coeff_idx, &coeff) in dct_coeffs[block_start..block_start + 16]
+            .iter()
+            .enumerate()
+            .skip(1)
+        {
+            let abs_coeff = coeff.abs();
+            if abs_coeff > max_value {
+                max_value = abs_coeff;
+            }
+            if abs_coeff > 0 {
+                last_non_zero = last_non_zero.max(block_idx * 16 + coeff_idx);
+            }
+        }
+    }
+
+    // Alpha is inversely related to complexity
+    // Higher last_non_zero/max_value ratio = more spread out = easier to compress
+    let alpha = if max_value > 1 {
+        (ALPHA_SCALE * last_non_zero as u32 / max_value as u32) as i32
+    } else {
+        0
+    };
+
+    // Clip to [0, MAX_ALPHA] - noise values are mostly outside this range
+    (MAX_ALPHA as i32 - alpha.clamp(0, MAX_ALPHA as i32)) as u8
+}
+
+/// Assign macroblocks to segments using k-means clustering on alpha values.
+///
+/// # Arguments
+/// * `alphas` - Alpha histogram (count of macroblocks with each alpha value)
+/// * `num_segments` - Number of segments to use (1-4)
+///
+/// # Returns
+/// (centers, map) where:
+/// - centers[i] = alpha center for segment i
+/// - map[alpha] = segment index for that alpha value
+pub fn assign_segments_kmeans(
+    alphas: &[u32; 256],
+    num_segments: usize,
+) -> ([u8; NUM_SEGMENTS], [u8; 256]) {
+    let num_segments = num_segments.min(NUM_SEGMENTS);
+    let mut centers = [0u8; NUM_SEGMENTS];
+    let mut map = [0u8; 256];
+
+    // Find min and max alpha with non-zero count
+    let mut min_a = 0usize;
+    let mut max_a = MAX_ALPHA as usize;
+
+    for (n, &count) in alphas.iter().enumerate() {
+        if count > 0 {
+            min_a = n;
+            break;
+        }
+    }
+    for n in (min_a..=MAX_ALPHA as usize).rev() {
+        if alphas[n] > 0 {
+            max_a = n;
+            break;
+        }
+    }
+
+    let range_a = max_a.saturating_sub(min_a);
+
+    // Initialize centers evenly spread across the range
+    for (k, center) in centers.iter_mut().enumerate().take(num_segments) {
+        let n = 1 + 2 * k;
+        *center = (min_a + (n * range_a) / (2 * num_segments)) as u8;
+    }
+
+    // K-means iterations
+    let mut accum = [0u32; NUM_SEGMENTS];
+    let mut dist_accum = [0u32; NUM_SEGMENTS];
+
+    for _ in 0..MAX_ITERS_K_MEANS {
+        // Reset accumulators
+        for i in 0..num_segments {
+            accum[i] = 0;
+            dist_accum[i] = 0;
+        }
+
+        // Assign each alpha value to nearest center
+        let mut current_center = 0usize;
+        for a in min_a..=max_a {
+            if alphas[a] > 0 {
+                // Find nearest center
+                while current_center + 1 < num_segments {
+                    let d_curr = (a as i32 - centers[current_center] as i32).abs();
+                    let d_next = (a as i32 - centers[current_center + 1] as i32).abs();
+                    if d_next < d_curr {
+                        current_center += 1;
+                    } else {
+                        break;
+                    }
+                }
+                map[a] = current_center as u8;
+                dist_accum[current_center] += a as u32 * alphas[a];
+                accum[current_center] += alphas[a];
+            }
+        }
+
+        // Move centers to center of their clouds
+        let mut displaced = 0i32;
+        for n in 0..num_segments {
+            if accum[n] > 0 {
+                let new_center = ((dist_accum[n] + accum[n] / 2) / accum[n]) as u8;
+                displaced += (centers[n] as i32 - new_center as i32).abs();
+                centers[n] = new_center;
+            }
+        }
+
+        // Early exit if centers have converged
+        if displaced < 5 {
+            break;
+        }
+    }
+
+    // Fill unused segments with last valid center
+    for i in num_segments..NUM_SEGMENTS {
+        centers[i] = centers[num_segments - 1];
+    }
+
+    (centers, map)
+}
+
+/// Compute per-segment quantization using libwebp's formula.
+///
+/// This matches VP8SetSegmentParams in libwebp/src/enc/quant_enc.c
+///
+/// # Arguments
+/// * `base_quant` - Base quantizer index (0-127), computed from quality
+/// * `segment_alpha` - Transformed alpha for this segment, in range [-127, 127]
+///                     Computed as: 255 * (center - mid) / (max - min)
+///                     Positive = easier to compress, negative = harder
+/// * `sns_strength` - SNS strength (0-100), higher = more segment differentiation
+///
+/// # Returns
+/// Adjusted quantizer index for this segment
+pub fn compute_segment_quant(base_quant: u8, segment_alpha: i32, sns_strength: u8) -> u8 {
+    // libwebp constant: scaling between SNS strength and quantizer modulation
+    const SNS_TO_DQ: f64 = 0.9;
+
+    // Amplitude of quantization modulation
+    // amp = SNS_TO_DQ * sns_strength / 100 / 128
+    let amp = SNS_TO_DQ * (sns_strength as f64) / 100.0 / 128.0;
+
+    // Exponent for power-law modulation
+    // segment_alpha is in [-127, 127] range
+    // Positive alpha (easy) -> expn < 1 -> higher compression -> higher quant
+    // Negative alpha (hard) -> expn > 1 -> lower compression -> lower quant
+    let expn = 1.0 - amp * (segment_alpha as f64);
+
+    // Ensure expn is positive (as asserted in libwebp)
+    if expn <= 0.0 {
+        return base_quant;
+    }
+
+    // Compression factor from base_quant
+    // Since base_quant = 127 * (1 - c_base), we have c_base = 1 - base_quant/127
+    let c_base = 1.0 - (base_quant as f64 / 127.0);
+
+    // Apply power-law modulation
+    let c = c_base.powf(expn);
+
+    // Convert back to quantizer index
+    let q = (127.0 * (1.0 - c)) as i32;
+    q.clamp(0, 127) as u8
 }
 
 //------------------------------------------------------------------------------

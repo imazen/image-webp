@@ -7,9 +7,13 @@ use crate::vp8::Frame;
 use crate::vp8_arithmetic_encoder::ArithmeticEncoder;
 use crate::vp8_common::*;
 use crate::vp8_cost::{
-    self, estimate_dc16_cost, estimate_residual_cost, rd_score_with_coeffs, FIXED_COSTS_I16,
-    FIXED_COSTS_UV, LAMBDA_I16, LAMBDA_UV,
+    self, assign_segments_kmeans, compute_segment_quant, estimate_dc16_cost,
+    estimate_residual_cost, rd_score_with_coeffs, record_coeffs, ProbaStats, TokenType,
+    FIXED_COSTS_I16, FIXED_COSTS_UV, LAMBDA_I16, LAMBDA_UV, MAX_ALPHA,
 };
+// compute_mb_alpha is available for more accurate DCT-based analysis if needed
+#[allow(unused_imports)]
+use crate::vp8_cost::compute_mb_alpha;
 // Intra4 imports - for future coefficient-level cost estimation
 #[allow(unused_imports)]
 use crate::vp8_cost::{calc_i4_penalty, get_i4_mode_cost, LAMBDA_I4, VP8_FIXED_COSTS_I4};
@@ -21,20 +25,30 @@ use crate::EncodingError;
 
 //------------------------------------------------------------------------------
 // Quality to quantization index mapping
+//
+// Ported from libwebp src/enc/quant_enc.c
+
+/// Convert user-facing quality (0-100) to compression factor.
+/// Emulates jpeg-like behaviour where Q75 is "good quality".
+/// Ported from libwebp's QualityToCompression().
+fn quality_to_compression(quality: u8) -> f64 {
+    let c = f64::from(quality) / 100.0;
+    // Piecewise linear mapping to get jpeg-like behavior at Q75
+    let linear_c = if c < 0.75 {
+        c * (2.0 / 3.0)
+    } else {
+        2.0 * c - 1.0
+    };
+    // File size roughly scales as pow(quantizer, 3), so we use inverse
+    linear_c.powf(1.0 / 3.0)
+}
 
 /// Convert user-facing quality (0-100) to internal quant index (0-127)
-///
-/// Uses simple linear mapping: Q0 → quant 127 (lowest quality), Q100 → quant 0 (highest quality)
-///
-/// Note: Our encoder produces larger files than libwebp at the same quality setting
-/// (~1.2-1.6x depending on quality level) due to missing optimizations:
-/// - Adaptive token probability updates
-/// - Segment-based quantization
-/// - Two-pass encoding
-///
-/// However, at the same file size, we achieve ~99% of libwebp's PSNR quality.
+/// Ported from libwebp's VP8SetSegmentParams().
 fn quality_to_quant_index(quality: u8) -> u8 {
-    127u16.saturating_sub(u16::from(quality) * 127 / 100) as u8
+    let c = quality_to_compression(quality);
+    let q = (127.0 * (1.0 - c)).round() as i32;
+    q.clamp(0, 127) as u8
 }
 
 //------------------------------------------------------------------------------
@@ -156,12 +170,18 @@ struct Vp8Encoder<W> {
     segments_enabled: bool,
     segments_update_map: bool,
     segment_tree_probs: [Prob; 3],
+    /// Segment ID for each macroblock (mb_width * mb_height)
+    segment_map: Vec<u8>,
 
     loop_filter_adjustments: bool,
     macroblock_no_skip_coeff: Option<u8>,
     quantization_indices: QuantizationIndices,
 
     token_probs: TokenProbTables,
+    /// Token statistics for adaptive probability updates
+    proba_stats: ProbaStats,
+    /// Updated probabilities computed from statistics
+    updated_probs: Option<TokenProbTables>,
 
     top_complexity: Vec<Complexity>,
     left_complexity: Complexity,
@@ -196,12 +216,15 @@ impl<W: Write> Vp8Encoder<W> {
             segments_enabled: false,
             segments_update_map: false,
             segment_tree_probs: [255, 255, 255], // Default probs
+            segment_map: Vec::new(),
 
             loop_filter_adjustments: false,
             macroblock_no_skip_coeff: None,
             quantization_indices: QuantizationIndices::default(),
 
             token_probs: Default::default(),
+            proba_stats: ProbaStats::new(),
+            updated_probs: None,
 
             top_complexity: Vec::new(),
             left_complexity: Complexity::default(),
@@ -313,10 +336,47 @@ impl<W: Write> Vp8Encoder<W> {
     fn encode_segment_updates(&mut self) {
         // Section 9.3 - Segment-based adjustments
         // update_mb_segmentation_map - whether we're updating the map
-        self.encoder.write_flag(false); // segments_update_map
-        // update_segment_feature_data - whether we're updating segment data
-        self.encoder.write_flag(false); // update_segment_feature_data
-        // If both are false, nothing more to write
+        self.encoder.write_flag(self.segments_update_map);
+
+        // update_segment_feature_data - whether we're updating segment feature data
+        // We always update when segments are enabled to set quantizer deltas
+        let update_data = self.segments_enabled;
+        self.encoder.write_flag(update_data);
+
+        if update_data {
+            // segment_feature_mode: 0 = delta, 1 = absolute
+            // We use delta mode (relative to base quantizer)
+            self.encoder.write_flag(false); // delta mode
+
+            // Write quantizer deltas for each segment (4 segments)
+            for seg in &self.segments {
+                let has_delta = seg.quantizer_level != 0;
+                self.encoder.write_flag(has_delta);
+                if has_delta {
+                    // Quantizer delta is signed 7-bit value
+                    let abs_val = seg.quantizer_level.unsigned_abs();
+                    self.encoder.write_literal(7, abs_val);
+                    self.encoder.write_flag(seg.quantizer_level < 0);
+                }
+            }
+
+            // Write loop filter deltas for each segment (always 0 for now)
+            for _ in 0..4 {
+                self.encoder.write_flag(false); // no loop filter delta
+            }
+        }
+
+        // Write segment ID tree probabilities if updating the map
+        if self.segments_update_map {
+            // Write the 3 probabilities for the segment ID tree
+            for &prob in &self.segment_tree_probs {
+                let has_prob = prob != 255; // 255 means no update
+                self.encoder.write_flag(has_prob);
+                if has_prob {
+                    self.encoder.write_literal(8, prob);
+                }
+            }
+        }
     }
 
     fn encode_loop_filter_adjustments(&mut self) {
@@ -340,14 +400,38 @@ impl<W: Write> Vp8Encoder<W> {
             .write_optional_signed_value(4, self.quantization_indices.uvac_delta);
     }
 
-    // TODO: work out when we want to update these probabilities
+    /// Encode token probability updates to the bitstream.
+    /// Uses accumulated statistics to decide which probabilities to update.
     fn encode_updated_token_probabilities(&mut self) {
-        for is in COEFF_UPDATE_PROBS.iter() {
-            for js in is.iter() {
-                for ks in js.iter() {
-                    for prob in ks.iter() {
-                        // currently just not updating these
-                        self.encoder.write_bool(false, *prob);
+        // Get the updated probabilities if available
+        let updated_probs = self.updated_probs.take();
+
+        for (t, is) in COEFF_UPDATE_PROBS.iter().enumerate() {
+            for (b, js) in is.iter().enumerate() {
+                for (c, ks) in js.iter().enumerate() {
+                    for (p, &update_prob) in ks.iter().enumerate() {
+                        let old_prob = self.token_probs[t][b][c][p];
+
+                        // Check if we have updated probabilities that differ from the default
+                        let (should_update, new_prob) = if let Some(ref probs) = updated_probs {
+                            let new_p = probs[t][b][c][p];
+                            // Only update if the probability actually changed
+                            (new_p != old_prob, new_p)
+                        } else {
+                            (false, old_prob)
+                        };
+
+                        if should_update {
+                            // Signal that we're updating this probability
+                            self.encoder.write_bool(true, update_prob);
+                            // Write the new probability value (8 bits)
+                            self.encoder.write_literal(8, new_prob);
+                            // Update our local copy for future encoding
+                            self.token_probs[t][b][c][p] = new_prob;
+                        } else {
+                            // Signal no update
+                            self.encoder.write_bool(false, update_prob);
+                        }
                     }
                 }
             }
@@ -754,6 +838,215 @@ impl<W: Write> Vp8Encoder<W> {
         true
     }
 
+    /// Record token statistics for a macroblock (used in first pass of two-pass encoding).
+    /// This mirrors the structure of encode_residual_data but only records stats.
+    fn record_residual_stats(
+        &mut self,
+        macroblock_info: &MacroblockInfo,
+        mbx: usize,
+        y_block_data: &[i32; 16 * 16],
+        u_block_data: &[i32; 16 * 4],
+        v_block_data: &[i32; 16 * 4],
+    ) {
+        // Extract VP8 matrices
+        let segment = &self.segments[macroblock_info.segment_id.unwrap_or(0)];
+        let y1_matrix = segment.y1_matrix.clone().unwrap();
+        let y2_matrix = segment.y2_matrix.clone().unwrap();
+        let uv_matrix = segment.uv_matrix.clone().unwrap();
+
+        let is_i4 = macroblock_info.luma_mode == LumaMode::B;
+
+        // Y2 (DC transform) - only for I16 mode
+        if !is_i4 {
+            let mut coeffs0 = get_coeffs0_from_block(y_block_data);
+            transform::wht4x4(&mut coeffs0);
+
+            // Quantize to zigzag order
+            let mut zigzag = [0i32; 16];
+            for i in 0..16 {
+                let zigzag_index = usize::from(ZIGZAG[i]);
+                zigzag[i] = y2_matrix.quantize_coeff(coeffs0[zigzag_index], zigzag_index);
+            }
+
+            let complexity = self.left_complexity.y2 + self.top_complexity[mbx].y2;
+            record_coeffs(
+                &zigzag,
+                TokenType::I16DC,
+                0,
+                complexity.min(2) as usize,
+                &mut self.proba_stats,
+            );
+
+            let has_coeffs = zigzag.iter().any(|&c| c != 0);
+            self.left_complexity.y2 = if has_coeffs { 1 } else { 0 };
+            self.top_complexity[mbx].y2 = if has_coeffs { 1 } else { 0 };
+        }
+
+        // Y1 blocks (AC only for I16, DC+AC for I4)
+        let token_type = if is_i4 { TokenType::I4 } else { TokenType::I16AC };
+        let first_coeff = if is_i4 { 0 } else { 1 };
+
+        for y in 0usize..4 {
+            let mut left = self.left_complexity.y[y];
+            for x in 0..4 {
+                let block: &[i32; 16] = y_block_data[y * 4 * 16 + x * 16..][..16]
+                    .try_into()
+                    .unwrap();
+
+                // Quantize to zigzag order
+                let mut zigzag = [0i32; 16];
+                for i in first_coeff..16 {
+                    let zigzag_index = usize::from(ZIGZAG[i]);
+                    zigzag[i] = y1_matrix.quantize_coeff(block[zigzag_index], zigzag_index);
+                }
+
+                let top = self.top_complexity[mbx].y[x];
+                let complexity = (left + top).min(2);
+
+                record_coeffs(
+                    &zigzag,
+                    token_type,
+                    first_coeff,
+                    complexity as usize,
+                    &mut self.proba_stats,
+                );
+
+                let has_coeffs = zigzag[first_coeff..].iter().any(|&c| c != 0);
+                left = if has_coeffs { 1 } else { 0 };
+                self.top_complexity[mbx].y[x] = if has_coeffs { 1 } else { 0 };
+            }
+            self.left_complexity.y[y] = left;
+        }
+
+        // U blocks
+        for y in 0usize..2 {
+            let mut left = self.left_complexity.u[y];
+            for x in 0usize..2 {
+                let block: &[i32; 16] = u_block_data[y * 2 * 16 + x * 16..][..16]
+                    .try_into()
+                    .unwrap();
+
+                let mut zigzag = [0i32; 16];
+                for i in 0..16 {
+                    let zigzag_index = usize::from(ZIGZAG[i]);
+                    zigzag[i] = uv_matrix.quantize_coeff(block[zigzag_index], zigzag_index);
+                }
+
+                let top = self.top_complexity[mbx].u[x];
+                let complexity = (left + top).min(2);
+
+                record_coeffs(&zigzag, TokenType::Chroma, 0, complexity as usize, &mut self.proba_stats);
+
+                let has_coeffs = zigzag.iter().any(|&c| c != 0);
+                left = if has_coeffs { 1 } else { 0 };
+                self.top_complexity[mbx].u[x] = if has_coeffs { 1 } else { 0 };
+            }
+            self.left_complexity.u[y] = left;
+        }
+
+        // V blocks
+        for y in 0usize..2 {
+            let mut left = self.left_complexity.v[y];
+            for x in 0usize..2 {
+                let block: &[i32; 16] = v_block_data[y * 2 * 16 + x * 16..][..16]
+                    .try_into()
+                    .unwrap();
+
+                let mut zigzag = [0i32; 16];
+                for i in 0..16 {
+                    let zigzag_index = usize::from(ZIGZAG[i]);
+                    zigzag[i] = uv_matrix.quantize_coeff(block[zigzag_index], zigzag_index);
+                }
+
+                let top = self.top_complexity[mbx].v[x];
+                let complexity = (left + top).min(2);
+
+                record_coeffs(&zigzag, TokenType::Chroma, 0, complexity as usize, &mut self.proba_stats);
+
+                let has_coeffs = zigzag.iter().any(|&c| c != 0);
+                left = if has_coeffs { 1 } else { 0 };
+                self.top_complexity[mbx].v[x] = if has_coeffs { 1 } else { 0 };
+            }
+            self.left_complexity.v[y] = left;
+        }
+    }
+
+    /// Compute updated probabilities from recorded statistics.
+    /// Only includes updates where the savings exceed a minimum threshold.
+    fn compute_updated_probabilities(&mut self) {
+        let mut updated = self.token_probs;
+        let mut total_savings = 0i32;
+        let mut num_updates = 0u32;
+
+        for t in 0..4 {
+            for b in 0..8 {
+                for c in 0..3 {
+                    for p in 0..11 {
+                        let old_prob = self.token_probs[t][b][c][p];
+                        let update_prob = COEFF_UPDATE_PROBS[t][b][c][p];
+
+                        let (should_update, new_p, savings) =
+                            self.proba_stats.should_update(t, b, c, p, old_prob, update_prob);
+
+                        // Only update if savings are significant enough
+                        // The signaling cost is approximately 9 bits (1 for flag + 8 for value)
+                        // We need at least 9*256 = 2304 savings in our units to break even
+                        // Add extra margin to account for estimation errors
+                        if should_update && savings > 3000 {
+                            updated[t][b][c][p] = new_p;
+                            total_savings += savings;
+                            num_updates += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Only use updated probabilities if we have net positive savings
+        if total_savings > 0 && num_updates > 0 {
+            self.updated_probs = Some(updated);
+        } else {
+            // Keep default probabilities - no updates
+            self.updated_probs = None;
+        }
+    }
+
+    /// Reset encoder state for second pass encoding.
+    fn reset_for_second_pass(&mut self) {
+        // Reset complexity tracking
+        for complexity in self.top_complexity.iter_mut() {
+            *complexity = Complexity::default();
+        }
+        self.left_complexity = Complexity::default();
+
+        // Reset B-pred tracking
+        for pred in self.top_b_pred.iter_mut() {
+            *pred = IntraMode::default();
+        }
+        self.left_b_pred = [IntraMode::default(); 4];
+
+        // Reset border pixels to initial state
+        self.left_border_y = [129u8; 16 + 1];
+        self.left_border_u = [129u8; 8 + 1];
+        self.left_border_v = [129u8; 8 + 1];
+
+        for val in self.top_border_y.iter_mut() {
+            *val = 127;
+        }
+        for val in self.top_border_u.iter_mut() {
+            *val = 127;
+        }
+        for val in self.top_border_v.iter_mut() {
+            *val = 127;
+        }
+
+        // Reset partitions
+        self.partitions = vec![ArithmeticEncoder::new()];
+
+        // Reset encoder
+        self.encoder = ArithmeticEncoder::new();
+    }
+
     fn encode_image(
         &mut self,
         data: &[u8],
@@ -785,9 +1078,71 @@ impl<W: Write> Vp8Encoder<W> {
 
         self.setup_encoding(lossy_quality, width, height, y_bytes, u_bytes, v_bytes);
 
+        // Two-pass encoding for adaptive probabilities is only beneficial at
+        // lower quality settings where there are fewer coefficients and the
+        // probability updates can provide meaningful savings.
+        // At high quality (Q >= 85), the overhead of signaling updates exceeds savings.
+        let use_two_pass = lossy_quality < 85;
+
+        if use_two_pass {
+            // ===== PASS 1: Collect token statistics for adaptive probabilities =====
+            self.proba_stats.reset();
+
+            for mby in 0..self.macroblock_height {
+                // reset left complexity / bpreds for left of image
+                self.left_complexity = Complexity::default();
+                self.left_b_pred = [IntraMode::default(); 4];
+
+                self.left_border_y = [129u8; 16 + 1];
+                self.left_border_u = [129u8; 8 + 1];
+                self.left_border_v = [129u8; 8 + 1];
+
+                for mbx in 0..self.macroblock_width {
+                    let macroblock_info = self.choose_macroblock_info(mbx.into(), mby.into());
+
+                    // Transform blocks (updates border state for next macroblock)
+                    let y_block_data =
+                        self.transform_luma_block(mbx.into(), mby.into(), &macroblock_info);
+
+                    let (u_block_data, v_block_data) = self.transform_chroma_blocks(
+                        mbx.into(),
+                        mby.into(),
+                        macroblock_info.chroma_mode,
+                    );
+
+                    // Record token statistics for this macroblock
+                    if !self.check_all_coeffs_zero(
+                        &macroblock_info,
+                        &y_block_data,
+                        &u_block_data,
+                        &v_block_data,
+                    ) {
+                        self.record_residual_stats(
+                            &macroblock_info,
+                            mbx as usize,
+                            &y_block_data,
+                            &u_block_data,
+                            &v_block_data,
+                        );
+                    } else {
+                        // Reset complexity for skipped blocks
+                        self.left_complexity.clear(macroblock_info.luma_mode != LumaMode::B);
+                        self.top_complexity[usize::from(mbx)]
+                            .clear(macroblock_info.luma_mode != LumaMode::B);
+                    }
+                }
+            }
+
+            // Compute optimal probabilities from statistics
+            self.compute_updated_probabilities();
+
+            // Reset state for actual encoding pass
+            self.reset_for_second_pass();
+        }
+
         self.encode_compressed_frame_header();
 
-        // encode residual partitions first
+        // encode residual partitions
         for mby in 0..self.macroblock_height {
             let partition_index = usize::from(mby) % self.partitions.len();
             // reset left complexity / bpreds for left of image
@@ -1221,11 +1576,19 @@ impl<W: Write> Vp8Encoder<W> {
         // Pick the best chroma mode using RD-based selection
         let chroma_mode = self.pick_best_uv(mbx, mby);
 
+        // Get segment ID from segment map if enabled
+        let segment_id = if self.segments_enabled && !self.segment_map.is_empty() {
+            let mb_idx = mby * usize::from(self.macroblock_width) + mbx;
+            Some(self.segment_map[mb_idx] as usize)
+        } else {
+            None
+        };
+
         MacroblockInfo {
             luma_mode,
             luma_bpred,
             chroma_mode,
-            segment_id: None,
+            segment_id,
             coeffs_skipped: false,
         }
     }
@@ -1245,6 +1608,135 @@ impl<W: Write> Vp8Encoder<W> {
 
         // Use the cost estimation function
         self.estimate_luma16_coeff_cost(&luma_blocks, segment)
+    }
+
+    /// Analyze image complexity and assign macroblocks to segments.
+    ///
+    /// This performs a fast analysis pass to:
+    /// 1. Compute "alpha" (compressibility) for each macroblock
+    /// 2. Build a histogram of alpha values
+    /// 3. Use k-means clustering to assign macroblocks to 4 segments
+    /// 4. Configure per-segment quantization based on alpha
+    ///
+    /// Segments allow different quantization for different image regions:
+    /// - Flat areas (high alpha) can use more aggressive quantization
+    /// - Textured areas (low alpha) need finer quantization to preserve detail
+    fn analyze_and_assign_segments(&mut self, base_quant_index: u8) {
+        let mb_width = usize::from(self.macroblock_width);
+        let mb_height = usize::from(self.macroblock_height);
+        let total_mbs = mb_width * mb_height;
+
+        // First pass: compute alpha for each macroblock using DC prediction
+        let mut mb_alphas = vec![0u8; total_mbs];
+        let mut alpha_histogram = [0u32; 256];
+
+        let width = usize::from(self.macroblock_width * 16);
+
+        for mby in 0..mb_height {
+            for mbx in 0..mb_width {
+                // For speed, we use a simplified alpha calculation based on pixel variance
+                // instead of the full DCT-based analysis (compute_mb_alpha).
+
+                // Get the raw pixel variance as a proxy for complexity
+                let src_base = mby * 16 * width + mbx * 16;
+                let mut sum: i64 = 0;
+                let mut sum_sq: i64 = 0;
+
+                for y in 0..16 {
+                    for x in 0..16 {
+                        let idx = src_base + y * width + x;
+                        let pixel = self.frame.ybuf[idx] as i64;
+                        sum += pixel;
+                        sum_sq += pixel * pixel;
+                    }
+                }
+
+                // Variance = E[X²] - E[X]²
+                let mean = sum / 256;
+                let variance = (sum_sq / 256 - mean * mean).max(0) as u32;
+
+                // Map variance to alpha: high variance = complex = low alpha
+                // Low variance = flat = high alpha
+                // Scale variance to [0, MAX_ALPHA] range, inverting it
+                let variance_scaled = (variance.min(16384) * 255 / 16384) as u8;
+                let alpha = MAX_ALPHA - variance_scaled;
+
+                // Store alpha and build histogram
+                let mb_idx = mby * mb_width + mbx;
+                mb_alphas[mb_idx] = alpha;
+                alpha_histogram[alpha as usize] += 1;
+            }
+        }
+
+        // Use k-means to assign segments (4 segments)
+        let (centers, alpha_to_segment) = assign_segments_kmeans(&alpha_histogram, 4);
+
+        // Compute weighted average alpha (mid-point for quantization adjustment)
+        // This matches libwebp's weighted_average computation in AssignSegments
+        let mut total_weighted = 0u64;
+        let mut total_count = 0u64;
+        for (alpha, &count) in alpha_histogram.iter().enumerate() {
+            total_weighted += alpha as u64 * count as u64;
+            total_count += count as u64;
+        }
+        let mid_alpha = if total_count > 0 {
+            (total_weighted / total_count) as i32
+        } else {
+            128
+        };
+
+        // Find min and max of centers for alpha transformation
+        // This matches libwebp's SetSegmentAlphas
+        let min_center = centers.iter().copied().min().unwrap_or(0) as i32;
+        let max_center = centers.iter().copied().max().unwrap_or(255) as i32;
+        let range = if max_center == min_center {
+            1 // Avoid division by zero
+        } else {
+            max_center - min_center
+        };
+
+        // Assign segment IDs to macroblocks
+        self.segment_map = mb_alphas
+            .iter()
+            .map(|&alpha| alpha_to_segment[alpha as usize])
+            .collect();
+
+        // Configure per-segment quantization
+        // SNS strength of 50 = moderate segment differentiation
+        let sns_strength: u8 = 50;
+
+        for (seg_idx, &center) in centers.iter().enumerate() {
+            let center = center as i32;
+
+            // Transform center to libwebp's alpha scale [-127, 127]
+            // Formula from SetSegmentAlphas: alpha = 255 * (center - mid) / (max - min)
+            let transformed_alpha = (255 * (center - mid_alpha) / range).clamp(-127, 127);
+
+            // Compute adjusted quantizer for this segment
+            let seg_quant_index =
+                compute_segment_quant(base_quant_index, transformed_alpha, sns_strength);
+            let seg_quant_usize = seg_quant_index as usize;
+
+            // Compute the delta from base quantizer
+            let delta = seg_quant_index as i8 - base_quant_index as i8;
+
+            let mut segment = Segment {
+                ydc: DC_QUANT[seg_quant_usize],
+                yac: AC_QUANT[seg_quant_usize],
+                y2dc: DC_QUANT[seg_quant_usize] * 2,
+                y2ac: ((i32::from(AC_QUANT[seg_quant_usize]) * 155 / 100) as i16).max(8),
+                uvdc: DC_QUANT[seg_quant_usize],
+                uvac: AC_QUANT[seg_quant_usize],
+                quantizer_level: delta,
+                ..Default::default()
+            };
+            segment.init_matrices();
+            self.segments[seg_idx] = segment;
+        }
+
+        // Enable segment-based encoding
+        self.segments_enabled = true;
+        self.segments_update_map = true;
     }
 
     // sets up the encoding of the encoder by setting all the encoder params based on the width and height
@@ -1272,9 +1764,11 @@ impl<W: Write> Vp8Encoder<W> {
         self.macroblock_width = mb_width;
         self.macroblock_height = mb_height;
 
-        // Use maximum filter level - our simple encoder produces more artifacts
-        // than libwebp, so aggressive filtering helps quality
-        let filter_level = 63u8;
+        // Compute optimal filter level based on quantization
+        // Use sharpness=0 (no sharpening reduction) and default filter_strength=50
+        let sharpness: u8 = 0;
+        let filter_strength: u8 = 50;
+        let filter_level = vp8_cost::compute_filter_level(quant_index, sharpness, filter_strength);
 
         self.frame = Frame {
             width,
@@ -1291,7 +1785,7 @@ impl<W: Write> Vp8Encoder<W> {
 
             filter_type: false,
             filter_level,
-            sharpness_level: 7, // Higher values preserve edges better
+            sharpness_level: sharpness, // Matches sharpness used in filter level calculation
         };
 
         self.top_complexity = vec![Complexity::default(); usize::from(mb_width)];
@@ -1304,25 +1798,47 @@ impl<W: Write> Vp8Encoder<W> {
         // The probability is P(not skip) - 200 means ~78% expected to have coefficients
         self.macroblock_no_skip_coeff = Some(200);
 
-        self.segments_enabled = false;
         let quantization_indices = QuantizationIndices {
             yac_abs: quant_index,
             ..Default::default()
         };
         self.quantization_indices = quantization_indices;
 
-        let mut segment = Segment {
-            ydc: DC_QUANT[quant_index_usize],
-            yac: AC_QUANT[quant_index_usize],
-            y2dc: DC_QUANT[quant_index_usize] * 2,
-            y2ac: ((i32::from(AC_QUANT[quant_index_usize]) * 155 / 100) as i16).max(8),
-            uvdc: DC_QUANT[quant_index_usize],
-            uvac: AC_QUANT[quant_index_usize],
-            ..Default::default()
-        };
-        // Initialize quantization matrices for trellis optimization
-        segment.init_matrices();
-        self.segments[0] = segment;
+        // Initialize all 4 segments with base quantization first
+        // This provides fallback values before segment analysis
+        for seg_idx in 0..4 {
+            let mut segment = Segment {
+                ydc: DC_QUANT[quant_index_usize],
+                yac: AC_QUANT[quant_index_usize],
+                y2dc: DC_QUANT[quant_index_usize] * 2,
+                y2ac: ((i32::from(AC_QUANT[quant_index_usize]) * 155 / 100) as i16).max(8),
+                uvdc: DC_QUANT[quant_index_usize],
+                uvac: AC_QUANT[quant_index_usize],
+                quantizer_level: 0, // No delta for base segment
+                ..Default::default()
+            };
+            segment.init_matrices();
+            self.segments[seg_idx] = segment;
+        }
+
+        // Segment-based quantization is currently DISABLED due to a bug:
+        // Many RD functions (pick_best_intra16, pick_best_intra4, etc.) use
+        // segments[0] hardcoded, but the encoding uses macroblock.segment_id.
+        // This mismatch causes terrible quality when segments have different quant.
+        // TODO: Fix by passing segment to all RD functions.
+        let total_mbs = usize::from(mb_width) * usize::from(mb_height);
+        let use_segments = false; // DISABLED - see comment above
+        let _ = total_mbs; // suppress unused warning
+
+        if use_segments {
+            // This will reconfigure segments with per-region quantization
+            self.analyze_and_assign_segments(quant_index);
+        } else {
+            // Disable segments for small images
+            self.segments_enabled = false;
+            self.segments_update_map = false;
+            self.segment_map = Vec::new();
+        }
 
         self.left_border_y = [129u8; 16 + 1];
         self.left_border_u = [129u8; 8 + 1];
