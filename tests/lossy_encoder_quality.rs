@@ -10,6 +10,7 @@
 //! baselines and will improve as mode selection is implemented.
 
 use dssim_core::Dssim;
+use fast_ssim2::{compute_frame_ssimulacra2, ColorPrimaries, Rgb, TransferCharacteristic};
 use image_webp::{ColorType, EncoderParams, WebPEncoder};
 use imgref::ImgVec;
 use rgb::RGBA;
@@ -85,6 +86,53 @@ fn calculate_dssim(original: &[u8], decoded: &[u8], width: u32, height: u32) -> 
 
     let (dssim_val, _) = dssim.compare(&orig_dssim, dec_dssim);
     dssim_val.into()
+}
+
+/// Calculate SSIMULACRA2 (state-of-the-art perceptual quality metric)
+/// Returns score where: 90+ = excellent, 70-90 = good, 50-70 = acceptable, <50 = poor
+/// Higher is better (opposite of DSSIM)
+fn calculate_ssimulacra2(original: &[u8], decoded: &[u8], width: u32, height: u32) -> f64 {
+    let w = width as usize;
+    let h = height as usize;
+
+    // sRGB gamma decode
+    fn srgb_to_linear(v: u8) -> f32 {
+        let x = v as f32 / 255.0;
+        if x <= 0.04045 {
+            x / 12.92
+        } else {
+            ((x + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    // Convert to linear RGB f32 format for fast-ssim2
+    let orig_rgb: Vec<[f32; 3]> = original
+        .chunks_exact(3)
+        .map(|p| [srgb_to_linear(p[0]), srgb_to_linear(p[1]), srgb_to_linear(p[2])])
+        .collect();
+    let dec_rgb: Vec<[f32; 3]> = decoded
+        .chunks_exact(3)
+        .map(|p| [srgb_to_linear(p[0]), srgb_to_linear(p[1]), srgb_to_linear(p[2])])
+        .collect();
+
+    let orig_img = Rgb::new(
+        orig_rgb,
+        w,
+        h,
+        TransferCharacteristic::Linear,
+        ColorPrimaries::BT709,
+    )
+    .unwrap();
+    let dec_img = Rgb::new(
+        dec_rgb,
+        w,
+        h,
+        TransferCharacteristic::Linear,
+        ColorPrimaries::BT709,
+    )
+    .unwrap();
+
+    compute_frame_ssimulacra2(orig_img, dec_img).unwrap()
 }
 
 /// Helper to create lossy encoder params
@@ -223,30 +271,35 @@ fn quality_comparison_at_same_size() {
         .decode()
         .expect("Failed to decode libwebp output");
 
-    // Calculate both PSNR and DSSIM
+    // Calculate PSNR, DSSIM, and SSIMULACRA2
     let our_psnr = calculate_psnr(&img, &our_decoded);
     let libwebp_psnr = calculate_psnr(&img, &libwebp_decoded);
     let our_dssim = calculate_dssim(&img, &our_decoded, width, height);
     let libwebp_dssim = calculate_dssim(&img, &libwebp_decoded, width, height);
+    let our_ssim2 = calculate_ssimulacra2(&img, &our_decoded, width, height);
+    let libwebp_ssim2 = calculate_ssimulacra2(&img, &libwebp_decoded, width, height);
 
     println!("=== Quality Comparison at Q75 ===");
     println!(
-        "Our encoder: {} bytes, PSNR = {:.2} dB, DSSIM = {:.6}",
+        "Our encoder: {} bytes, PSNR = {:.2} dB, DSSIM = {:.6}, SSIMULACRA2 = {:.2}",
         our_output.len(),
         our_psnr,
-        our_dssim
+        our_dssim,
+        our_ssim2
     );
     println!(
-        "libwebp:     {} bytes, PSNR = {:.2} dB, DSSIM = {:.6}",
+        "libwebp:     {} bytes, PSNR = {:.2} dB, DSSIM = {:.6}, SSIMULACRA2 = {:.2}",
         libwebp_output.len(),
         libwebp_psnr,
-        libwebp_dssim
+        libwebp_dssim,
+        libwebp_ssim2
     );
     println!(
-        "Ratio: size {:.2}x, PSNR {:.1}%, DSSIM {:.2}x",
+        "Ratio: size {:.2}x, PSNR {:.1}%, DSSIM {:.2}x, SSIMULACRA2 {:.1}%",
         our_output.len() as f64 / libwebp_output.len() as f64,
         100.0 * our_psnr / libwebp_psnr,
-        our_dssim / libwebp_dssim.max(0.0001) // avoid div by zero
+        our_dssim / libwebp_dssim.max(0.0001), // avoid div by zero
+        100.0 * our_ssim2 / libwebp_ssim2.max(0.01)
     );
 
     // Our quality should be at least 80% of libwebp's PSNR
