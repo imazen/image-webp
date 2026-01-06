@@ -6,6 +6,10 @@ use crate::transform;
 use crate::vp8::Frame;
 use crate::vp8_arithmetic_encoder::ArithmeticEncoder;
 use crate::vp8_common::*;
+use crate::vp8_cost::{self, FIXED_COSTS_I16, FIXED_COSTS_UV, LAMBDA_I16, LAMBDA_UV};
+// Intra4 imports - kept for future coefficient-level cost estimation
+#[allow(unused_imports)]
+use crate::vp8_cost::{FIXED_COSTS_I4, INTRA4_PENALTY, LAMBDA_I4};
 use crate::vp8_prediction::*;
 use crate::yuv::convert_image_y;
 use crate::yuv::convert_image_yuv;
@@ -751,24 +755,25 @@ impl<W: Write> Vp8Encoder<W> {
         Ok(())
     }
 
-    /// Select the best 16x16 luma prediction mode by trying all modes and picking
-    /// the one with lowest SSE (sum of squared errors).
+    /// Select the best 16x16 luma prediction mode using RD (rate-distortion) cost.
     ///
-    /// This is based on libwebp's PickBestIntra16 but simplified to use only SSE
-    /// without full RD (rate-distortion) optimization.
+    /// Tries all 4 modes (DC, V, H, TM) and picks the one with lowest RD cost:
+    ///   RD_cost = SSE * 256 + mode_cost * lambda
     ///
-    /// Returns (best_mode, sse) for comparison against Intra4x4.
-    fn pick_best_intra16(&self, mbx: usize, mby: usize) -> (LumaMode, u32) {
+    /// This balances distortion against the bit cost of signaling the mode.
+    ///
+    /// Returns (best_mode, rd_score) for comparison against Intra4x4.
+    fn pick_best_intra16(&self, mbx: usize, mby: usize) -> (LumaMode, u64) {
         let mbw = usize::from(self.macroblock_width);
         let src_width = mbw * 16;
 
-        // The 4 modes to try for 16x16 luma prediction
+        // The 4 modes to try for 16x16 luma prediction (order matches FIXED_COSTS_I16)
         const MODES: [LumaMode; 4] = [LumaMode::DC, LumaMode::V, LumaMode::H, LumaMode::TM];
 
         let mut best_mode = LumaMode::DC;
-        let mut best_sse = u32::MAX;
+        let mut best_rd_score = u64::MAX;
 
-        for &mode in &MODES {
+        for (mode_idx, &mode) in MODES.iter().enumerate() {
             // Skip V mode if no top row available (first row of macroblocks)
             if mode == LumaMode::V && mby == 0 {
                 continue;
@@ -788,19 +793,21 @@ impl<W: Write> Vp8Encoder<W> {
             // Compute SSE between source and prediction
             let sse = sse_16x16_luma(&self.frame.ybuf, src_width, mbx, mby, &pred);
 
-            if sse < best_sse {
-                best_sse = sse;
+            // Compute RD cost: SSE * 256 + mode_cost * lambda
+            let mode_cost = FIXED_COSTS_I16[mode_idx];
+            let rd_score = vp8_cost::rd_score(sse, mode_cost, LAMBDA_I16);
+
+            if rd_score < best_rd_score {
+                best_rd_score = rd_score;
                 best_mode = mode;
             }
         }
 
-        (best_mode, best_sse)
+        (best_mode, best_rd_score)
     }
 
     /// Apply a 4x4 intra prediction mode to the working buffer
-    ///
-    /// Note: Currently unused - reserved for future Intra4x4 mode selection with RD optimization
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Kept for future Intra4 mode selection with coefficient-level costs
     fn apply_intra4_prediction(
         ws: &mut [u8; LUMA_BLOCK_SIZE],
         mode: IntraMode,
@@ -823,9 +830,7 @@ impl<W: Write> Vp8Encoder<W> {
     }
 
     /// Compute SSE for a 4x4 subblock between source image and prediction buffer
-    ///
-    /// Note: Currently unused - reserved for future Intra4x4 mode selection with RD optimization
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Kept for future Intra4 mode selection with coefficient-level costs
     fn sse_4x4_subblock(
         &self,
         pred: &[u8; LUMA_BLOCK_SIZE],
@@ -853,17 +858,18 @@ impl<W: Write> Vp8Encoder<W> {
         sse
     }
 
-    /// Select the best intra4x4 modes for all 16 subblocks.
+    /// Select the best intra4x4 modes for all 16 subblocks using RD optimization.
     ///
     /// This processes subblocks in raster order, reconstructing each subblock
     /// after mode selection so that subsequent subblocks can use it as reference.
     ///
-    /// Returns (modes, total_sse) for comparison against Intra16.
+    /// Returns (modes, total_sse, total_mode_cost) for comparison against Intra16.
+    /// The caller will compute the final RD cost using these values.
     ///
-    /// Note: Currently unused because SSE-only comparison doesn't account for
-    /// bit cost. Requires RD optimization to be useful.
+    /// NOTE: Currently disabled because SSE-based comparison doesn't reflect
+    /// actual bit costs. Requires coefficient-level cost estimation to be useful.
     #[allow(dead_code)]
-    fn pick_best_intra4(&self, mbx: usize, mby: usize) -> ([IntraMode; 16], u32) {
+    fn pick_best_intra4(&self, mbx: usize, mby: usize) -> ([IntraMode; 16], u32, u32) {
         let mbw = usize::from(self.macroblock_width);
         let src_width = mbw * 16;
 
@@ -883,15 +889,11 @@ impl<W: Write> Vp8Encoder<W> {
 
         let mut best_modes = [IntraMode::DC; 16];
         let mut total_sse = 0u32;
+        let mut total_mode_cost = 0u32;
 
         // Create working buffer with border
-        let mut y_with_border = create_border_luma(
-            mbx,
-            mby,
-            mbw,
-            &self.top_border_y,
-            &self.left_border_y,
-        );
+        let mut y_with_border =
+            create_border_luma(mbx, mby, mbw, &self.top_border_y, &self.left_border_y);
 
         let segment = self.segments[0];
 
@@ -903,10 +905,12 @@ impl<W: Write> Vp8Encoder<W> {
                 let x0 = sbx * 4 + 1;
 
                 let mut best_mode = IntraMode::DC;
+                let mut best_mode_idx = 0usize;
                 let mut best_sse = u32::MAX;
+                let mut best_rd_cost = u64::MAX;
 
-                // Try each mode and pick the best
-                for &mode in &MODES {
+                // Try each mode and pick the best using RD cost
+                for (mode_idx, &mode) in MODES.iter().enumerate() {
                     // Make a copy to test this mode
                     let mut test_buf = y_with_border;
                     Self::apply_intra4_prediction(&mut test_buf, mode, x0, y0);
@@ -914,14 +918,21 @@ impl<W: Write> Vp8Encoder<W> {
                     // Compute SSE for this subblock
                     let sse = self.sse_4x4_subblock(&test_buf, mbx, mby, sbx, sby);
 
-                    if sse < best_sse {
+                    // Compute RD cost for this mode (using LAMBDA_I4 for internal selection)
+                    let mode_cost = FIXED_COSTS_I4[mode_idx];
+                    let rd_cost = vp8_cost::rd_score(sse, mode_cost, LAMBDA_I4);
+
+                    if rd_cost < best_rd_cost {
+                        best_rd_cost = rd_cost;
                         best_sse = sse;
                         best_mode = mode;
+                        best_mode_idx = mode_idx;
                     }
                 }
 
                 best_modes[i] = best_mode;
                 total_sse += best_sse;
+                total_mode_cost += u32::from(FIXED_COSTS_I4[best_mode_idx]);
 
                 // Apply the selected mode to the working buffer
                 Self::apply_intra4_prediction(&mut y_with_border, best_mode, x0, y0);
@@ -956,22 +967,24 @@ impl<W: Write> Vp8Encoder<W> {
             }
         }
 
-        (best_modes, total_sse)
+        (best_modes, total_sse, total_mode_cost)
     }
 
-    /// Select the best chroma prediction mode by trying all modes and picking
-    /// the one with lowest combined SSE for U and V planes.
+    /// Select the best chroma prediction mode using RD (rate-distortion) cost.
+    ///
+    /// Tries all 4 modes and picks the one with lowest RD cost for U+V combined.
     fn pick_best_uv(&self, mbx: usize, mby: usize) -> ChromaMode {
         let mbw = usize::from(self.macroblock_width);
         let chroma_width = mbw * 8;
 
+        // Order matches FIXED_COSTS_UV
         const MODES: [ChromaMode; 4] =
             [ChromaMode::DC, ChromaMode::V, ChromaMode::H, ChromaMode::TM];
 
         let mut best_mode = ChromaMode::DC;
-        let mut best_sse = u32::MAX;
+        let mut best_rd_score = u64::MAX;
 
-        for &mode in &MODES {
+        for (mode_idx, &mode) in MODES.iter().enumerate() {
             // Skip modes that need unavailable reference pixels
             if mode == ChromaMode::V && mby == 0 {
                 continue;
@@ -1004,8 +1017,12 @@ impl<W: Write> Vp8Encoder<W> {
             let sse_v = sse_8x8_chroma(&self.frame.vbuf, chroma_width, mbx, mby, &pred_v);
             let sse = sse_u + sse_v;
 
-            if sse < best_sse {
-                best_sse = sse;
+            // Compute RD cost
+            let mode_cost = FIXED_COSTS_UV[mode_idx];
+            let rd_score = vp8_cost::rd_score(sse, mode_cost, LAMBDA_UV);
+
+            if rd_score < best_rd_score {
+                best_rd_score = rd_score;
                 best_mode = mode;
             }
         }
@@ -1014,21 +1031,27 @@ impl<W: Write> Vp8Encoder<W> {
     }
 
     fn choose_macroblock_info(&self, mbx: usize, mby: usize) -> MacroblockInfo {
-        // Pick the best 16x16 luma mode using SSE-based selection
-        let (luma_mode, _sse) = self.pick_best_intra16(mbx, mby);
+        // Pick the best 16x16 luma mode using RD cost selection
+        let (luma_mode, _rd_score) = self.pick_best_intra16(mbx, mby);
 
-        // Note: Intra4x4 mode selection is implemented (pick_best_intra4) but
-        // disabled because SSE-only comparison doesn't account for bit cost.
-        // Intra4 uses ~60 extra bits for mode signaling and doesn't benefit
-        // from Y2 (WHT) DC coefficient collection, leading to larger files
-        // for images where Intra16 works well (e.g., smooth areas, patterns).
+        // TODO: Intra4x4 mode selection is implemented (pick_best_intra4) but disabled.
         //
-        // Proper Intra4 vs Intra16 comparison requires rate-distortion (RD)
-        // optimization: RD_cost = Rate * lambda + Distortion
-        // This is a TODO for future improvement.
+        // The issue: SSE-based RD comparison doesn't accurately reflect actual bit costs.
+        // For patterns like checkerboard, Intra4 has near-zero SSE (perfect prediction)
+        // but produces larger files because:
+        // 1. 16 subblock modes must be encoded vs 1 macroblock mode
+        // 2. Intra16's Y2 WHT collects DC coefficients efficiently
+        // 3. After quantization, Intra16's high-SSE residuals often compress well
+        //
+        // Proper Intra4 selection requires coefficient-level cost estimation:
+        // - Estimate actual bits from transformed/quantized coefficients
+        // - Account for context-dependent mode probabilities
+        // - Consider Y2 WHT benefit for Intra16
+        //
+        // For now, use Intra16-only which produces smaller, good-quality output.
         let luma_bpred = None;
 
-        // Pick the best chroma mode using SSE-based selection
+        // Pick the best chroma mode using RD-based selection
         let chroma_mode = self.pick_best_uv(mbx, mby);
 
         MacroblockInfo {
