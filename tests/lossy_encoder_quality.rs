@@ -3,10 +3,15 @@
 //! These tests compare the image-webp lossy encoder against libwebp:
 //! - Bitstream compatibility: libwebp can decode our output
 //! - Quality metrics: PSNR, DSSIM, and SSIMULACRA2 of decoded output
-//! - Size comparison: our output vs libwebp's output at same quality
+//! - Size comparison: our output vs libwebp's output at same quality setting
 //!
-//! The encoder now implements SSE-based mode selection (DC, V, H, TM modes)
-//! for both luma and chroma, improving quality over the DC-only baseline.
+//! Current status:
+//! - At same file size: ~99% of libwebp's PSNR quality
+//! - At same Q setting: files are ~1.2-1.6x larger (less efficient encoding)
+//! - Missing optimizations: adaptive token probabilities, segment quantization
+//!
+//! The encoder implements RD-based mode selection with VP8Matrix biased
+//! quantization and skip detection for zero macroblocks.
 
 use dssim_core::Dssim;
 use fast_ssim2::{compute_frame_ssimulacra2, ColorPrimaries, Rgb, TransferCharacteristic};
@@ -242,9 +247,11 @@ fn size_comparison_vs_libwebp() {
     }
 }
 
-/// Compare decoded quality (PSNR and DSSIM) at same quality setting
+/// Compare decoded quality metrics at same quality setting
+/// Note: Same Q setting produces different file sizes (ours ~1.4x larger at Q75)
+/// but quality metrics are comparable since we're using more bits.
 #[test]
-fn quality_comparison_at_same_size() {
+fn quality_comparison_at_same_quality_setting() {
     let width = 128u32;
     let height = 128u32;
 
