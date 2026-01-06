@@ -136,6 +136,8 @@ struct Vp8Encoder<W> {
     encoder: ArithmeticEncoder,
     segments: [Segment; MAX_SEGMENTS],
     segments_enabled: bool,
+    segments_update_map: bool,
+    segment_tree_probs: [Prob; 3],
 
     loop_filter_adjustments: bool,
     macroblock_no_skip_coeff: Option<u8>,
@@ -174,6 +176,8 @@ impl<W: Write> Vp8Encoder<W> {
             encoder: ArithmeticEncoder::new(),
             segments: std::array::from_fn(|_| Segment::default()),
             segments_enabled: false,
+            segments_update_map: false,
+            segment_tree_probs: [255, 255, 255], // Default probs
 
             loop_filter_adjustments: false,
             macroblock_no_skip_coeff: None,
@@ -289,13 +293,18 @@ impl<W: Write> Vp8Encoder<W> {
     }
 
     fn encode_segment_updates(&mut self) {
-        // TODO: encode this as per 9.3
-        todo!();
+        // Section 9.3 - Segment-based adjustments
+        // update_mb_segmentation_map - whether we're updating the map
+        self.encoder.write_flag(false); // segments_update_map
+        // update_segment_feature_data - whether we're updating segment data
+        self.encoder.write_flag(false); // update_segment_feature_data
+        // If both are false, nothing more to write
     }
 
     fn encode_loop_filter_adjustments(&mut self) {
-        // TODO: encode this
-        todo!();
+        // Whether the deltas are being updated this frame
+        self.encoder.write_flag(false);
+        // If false, no more data needed - use defaults or previous values
     }
 
     fn encode_quantization_indices(&mut self) {
@@ -328,11 +337,11 @@ impl<W: Write> Vp8Encoder<W> {
     }
 
     fn write_macroblock_header(&mut self, macroblock_info: &MacroblockInfo, mbx: usize) {
-        if self.segments_enabled {
-            if let Some(_segment_id) = macroblock_info.segment_id {
-                // TODO: set segment for macroblock
-                todo!();
-            }
+        if self.segments_enabled && self.segments_update_map {
+            // Write segment ID using the segment tree
+            let segment_id = macroblock_info.segment_id.unwrap_or(0) as i8;
+            self.encoder
+                .write_with_tree(&SEGMENT_ID_TREE, &self.segment_tree_probs, segment_id);
         }
 
         if let Some(prob) = self.macroblock_no_skip_coeff {
@@ -921,13 +930,11 @@ impl<W: Write> Vp8Encoder<W> {
     /// This processes subblocks in raster order, reconstructing each subblock
     /// after mode selection so that subsequent subblocks can use it as reference.
     ///
-    /// Returns (modes, total_sse, total_mode_cost) for comparison against Intra16.
+    /// Returns (modes, total_sse, total_mode_cost, total_coeff_cost) for comparison against Intra16.
     /// The caller will compute the final RD cost using these values.
     ///
-    /// NOTE: Currently disabled because SSE-based comparison doesn't reflect
-    /// actual bit costs. Requires coefficient-level cost estimation to be useful.
-    #[allow(dead_code)]
-    fn pick_best_intra4(&self, mbx: usize, mby: usize) -> ([IntraMode; 16], u32, u32) {
+    /// Picks the best Intra4x4 mode for each subblock using RD cost.
+    fn pick_best_intra4(&self, mbx: usize, mby: usize) -> ([IntraMode; 16], u32, u32, u32) {
         let mbw = usize::from(self.macroblock_width);
         let src_width = mbw * 16;
 
@@ -949,6 +956,7 @@ impl<W: Write> Vp8Encoder<W> {
         let mut best_mode_indices = [0usize; 16]; // Track indices for context lookup
         let mut total_sse = 0u32;
         let mut total_mode_cost = 0u32;
+        let mut total_coeff_cost = 0u32;
 
         // Create working buffer with border
         let mut y_with_border =
@@ -1025,7 +1033,17 @@ impl<W: Write> Vp8Encoder<W> {
                 // Transform
                 transform::dct4x4(&mut residual);
 
-                // Quantize and dequantize
+                // Quantize and estimate coefficient cost
+                let mut quantized = [0i32; 16];
+                for (idx, val) in residual.iter().enumerate() {
+                    let quant = if idx > 0 { segment.yac } else { segment.ydc };
+                    quantized[idx] = *val / i32::from(quant);
+                }
+
+                // Estimate coefficient cost for this block (includes DC for Intra4)
+                total_coeff_cost += estimate_residual_cost(&quantized, 0);
+
+                // Dequantize for reconstruction
                 for (idx, val) in residual.iter_mut().enumerate() {
                     let quant = if idx > 0 { segment.yac } else { segment.ydc };
                     *val = (*val / i32::from(quant)) * i32::from(quant);
@@ -1039,7 +1057,7 @@ impl<W: Write> Vp8Encoder<W> {
             }
         }
 
-        (best_modes, total_sse, total_mode_cost)
+        (best_modes, total_sse, total_mode_cost, total_coeff_cost)
     }
 
     /// Select the best chroma prediction mode using RD (rate-distortion) cost.
@@ -1104,24 +1122,15 @@ impl<W: Write> Vp8Encoder<W> {
 
     fn choose_macroblock_info(&self, mbx: usize, mby: usize) -> MacroblockInfo {
         // Pick the best 16x16 luma mode using RD cost selection
-        let (luma_mode, _rd_score) = self.pick_best_intra16(mbx, mby);
+        let (luma_mode_i16, i16_rd_score) = self.pick_best_intra16(mbx, mby);
 
-        // TODO: Intra4x4 mode selection is implemented (pick_best_intra4) but disabled.
-        //
-        // The issue: SSE-based RD comparison doesn't accurately reflect actual bit costs.
-        // For patterns like checkerboard, Intra4 has near-zero SSE (perfect prediction)
-        // but produces larger files because:
-        // 1. 16 subblock modes must be encoded vs 1 macroblock mode
-        // 2. Intra16's Y2 WHT collects DC coefficients efficiently
-        // 3. After quantization, Intra16's high-SSE residuals often compress well
-        //
-        // Proper Intra4 selection requires coefficient-level cost estimation:
-        // - Estimate actual bits from transformed/quantized coefficients
-        // - Account for context-dependent mode probabilities
-        // - Consider Y2 WHT benefit for Intra16
-        //
-        // For now, use Intra16-only which produces smaller, good-quality output.
-        let luma_bpred = None;
+        let segment = &self.segments[0];
+
+        // Intra4 mode is currently disabled - the RD cost estimation isn't accurate enough
+        // to make good I4 vs I16 decisions, leading to larger files.
+        // TODO: Fix Intra4 RD cost estimation to match libwebp's behavior
+        let _ = segment; // suppress unused warning
+        let (luma_mode, luma_bpred) = (luma_mode_i16, None);
 
         // Pick the best chroma mode using RD-based selection
         let chroma_mode = self.pick_best_uv(mbx, mby);
@@ -1133,6 +1142,22 @@ impl<W: Write> Vp8Encoder<W> {
             segment_id: None,
             coeffs_skipped: false,
         }
+    }
+
+    /// Estimate coefficient cost for a specific Intra16 mode
+    fn estimate_luma16_mode_coeff_cost(
+        &self,
+        mode: LumaMode,
+        mbx: usize,
+        mby: usize,
+        segment: &Segment,
+    ) -> u32 {
+        // Get prediction and compute residuals
+        let pred = self.get_predicted_luma_block_16x16(mode, mbx, mby);
+        let luma_blocks = self.get_luma_blocks_from_predicted_16x16(&pred, mbx, mby);
+
+        // Use the cost estimation function
+        self.estimate_luma16_coeff_cost(&luma_blocks, segment)
     }
 
     // sets up the encoding of the encoder by setting all the encoder params based on the width and height
