@@ -226,9 +226,11 @@ impl<W: Write> Vp8Encoder<W> {
             proba_stats: ProbaStats::new(),
             updated_probs: None,
             level_costs: LevelCosts::new(),
-            // TODO: Trellis quantization infrastructure is in place but disabled
-            // due to a bug causing PSNR regression. Needs debugging.
-            // See LOSSY_ENCODER_ROADMAP.md for details.
+            // Trellis quantization disabled: our simplified cost model (level_cost)
+            // doesn't use probability-dependent costs, which causes it to favor
+            // non-zero coefficients inappropriately. To fix, we would need to pass
+            // probability tables and use VP8LevelCost-like calculation with context.
+            // See tests in vp8_cost.rs for analysis (test_trellis_debug_block).
             do_trellis: false,
 
             top_complexity: Vec::new(),

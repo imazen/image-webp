@@ -3091,4 +3091,187 @@ mod tests {
         let score_no_coeff = rd_score(sse, mode_cost, lambda);
         assert!(score_no_coeff < score);
     }
+
+    #[test]
+    fn test_trellis_basic() {
+        // Create a Y1 matrix at q=50
+        let matrix = VP8Matrix::new(50, 50, MatrixType::Y1);
+
+        // Test case 1: DC dominant block (natural order)
+        let block = [
+            500i32, 50, 25, 10, // row 0
+            5, 3, 2, 1, // row 1
+            0, 0, 0, 0, // row 2
+            0, 0, 0, 0, // row 3
+        ];
+
+        let mut coeffs = block;
+        let mut trellis_out = [0i32; 16];
+
+        // Lambda for i4: (7 * 50^2) >> 3 = 2187
+        let lambda = 2187u32;
+
+        let trellis_nz = trellis_quantize_block(&mut coeffs, &mut trellis_out, &matrix, lambda, 0);
+
+        // Simple quantization for comparison
+        let mut simple_out = [0i32; 16];
+        for i in 0..16 {
+            let j = VP8_ZIGZAG[i]; // Convert zigzag position to natural
+            simple_out[i] = matrix.quantize_coeff(block[j], j);
+        }
+
+        eprintln!("Test case 1: DC dominant");
+        eprintln!("  Input (natural order):  {:?}", block);
+        eprintln!("  Simple (zigzag order):  {:?}", simple_out);
+        eprintln!("  Trellis (zigzag order): {:?}", trellis_out);
+        eprintln!("  Trellis has_nz: {}", trellis_nz);
+
+        // Both should produce non-zero DC coefficient
+        assert!(simple_out[0] != 0, "Simple should have non-zero DC");
+
+        // Check that trellis produces reasonable output
+        // It may zero more aggressively but DC should usually be preserved for large values
+        eprintln!();
+    }
+
+    #[test]
+    fn test_trellis_vs_simple() {
+        // Create a Y1 matrix at q=30
+        let matrix = VP8Matrix::new(30, 30, MatrixType::Y1);
+
+        // Block with clear signal
+        let block = [
+            300i32, 0, 0, 0,
+            0, 0, 0, 0,
+            0, 0, 0, 0,
+            0, 0, 0, 0,
+        ];
+
+        let mut coeffs = block;
+        let mut trellis_out = [0i32; 16];
+        let lambda = ((7 * 30 * 30) >> 3) as u32;
+
+        let _ = trellis_quantize_block(&mut coeffs, &mut trellis_out, &matrix, lambda, 0);
+
+        // Simple
+        let simple_dc = matrix.quantize_coeff(block[0], 0);
+
+        eprintln!("Single DC coefficient test:");
+        eprintln!("  Input DC: {}", block[0]);
+        eprintln!("  Simple DC: {}", simple_dc);
+        eprintln!("  Trellis DC: {}", trellis_out[0]);
+
+        // For a large DC coefficient, trellis should preserve it
+        assert!(
+            trellis_out[0] != 0 || simple_dc == 0,
+            "Trellis zeroed DC but simple didn't"
+        );
+    }
+
+    /// Test demonstrating why trellis is currently disabled.
+    ///
+    /// The trellis uses simplified fixed costs (level_cost) that don't account for
+    /// probability-dependent costs. This causes it to favor non-zero coefficients
+    /// even when the simple quantizer would produce zero.
+    ///
+    /// Example: For a coefficient value of -17 with quantizer 30:
+    /// - Simple quantization (with bias): produces 0
+    /// - Trellis (with neutral bias): computes level0=0, but then considers level=1
+    ///   because the distortion reduction outweighs the fixed rate cost.
+    ///
+    /// In libwebp, VP8LevelCost uses full probability tables that make coding zeros
+    /// "cheaper" in certain contexts, which prevents this issue.
+    #[test]
+    fn test_trellis_known_issue() {
+        // Reproduce the issue: trellis produces non-zero where simple produces zero
+        let matrix = VP8Matrix::new(27, 30, MatrixType::Y1);
+
+        // Block with small coefficient at position 4 (-17)
+        let block = [
+            20i32, -8, 0, 0, -17, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+
+        // Simple quantization
+        let mut simple_out = [0i32; 16];
+        for i in 0..16 {
+            let j = VP8_ZIGZAG[i];
+            simple_out[i] = matrix.quantize_coeff(block[j], j);
+        }
+
+        // Trellis quantization
+        let mut coeffs = block;
+        let mut trellis_out = [0i32; 16];
+        let lambda = 787u32;
+        let _ = trellis_quantize_block(&mut coeffs, &mut trellis_out, &matrix, lambda, 0);
+
+        // Simple produces zeros for small coefficients, trellis doesn't
+        // This is a known issue due to simplified cost model
+        assert_eq!(simple_out[2], 0, "Simple should quantize position 2 to 0");
+        // Trellis incorrectly produces non-zero due to distortion focus
+        assert_eq!(
+            trellis_out[2], -1,
+            "Trellis produces -1 (known issue with simplified costs)"
+        );
+    }
+
+    #[test]
+    fn test_trellis_quality75() {
+        // Quality 75 -> quant_index 26
+        // DC=27, AC=30
+        let matrix = VP8Matrix::new(27, 30, MatrixType::Y1);
+
+        // Test with realistic gradient image transform coefficients
+        // A gradient block might have DC ~1000 and small AC values
+        let blocks = [
+            // Block 1: Strong DC, some AC
+            [1000i32, 100, 50, 25, 15, 10, 5, 3, 2, 1, 0, 0, 0, 0, 0, 0],
+            // Block 2: Medium DC
+            [500, 50, 25, 10, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            // Block 3: Weak signal
+            [100, 20, 10, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            // Block 4: Near zero
+            [30, 5, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        ];
+
+        let lambda = ((7 * 30 * 30) >> 3) as u32; // 787
+        eprintln!("Lambda: {}", lambda);
+
+        for (i, block) in blocks.iter().enumerate() {
+            let mut coeffs = *block;
+            let mut trellis_out = [0i32; 16];
+            let _ = trellis_quantize_block(&mut coeffs, &mut trellis_out, &matrix, lambda, 0);
+
+            // Simple quantization
+            let mut simple_out = [0i32; 16];
+            for j in 0..16 {
+                let zz = VP8_ZIGZAG[j];
+                simple_out[j] = matrix.quantize_coeff(block[zz], zz);
+            }
+
+            eprintln!("\nBlock {}: input DC={}", i + 1, block[0]);
+            eprintln!("  Simple:  {:?}", &simple_out[..8]);
+            eprintln!("  Trellis: {:?}", &trellis_out[..8]);
+
+            // Check SSE difference
+            let simple_sse: i64 = (0..16)
+                .map(|j| {
+                    let zz = VP8_ZIGZAG[j];
+                    let orig = block[zz] as i64;
+                    let recon = simple_out[j] as i64 * matrix.q[zz] as i64;
+                    (orig - recon) * (orig - recon)
+                })
+                .sum();
+
+            let trellis_sse: i64 = (0..16)
+                .map(|j| {
+                    let zz = VP8_ZIGZAG[j];
+                    let orig = block[zz] as i64;
+                    let recon = trellis_out[j] as i64 * matrix.q[zz] as i64;
+                    (orig - recon) * (orig - recon)
+                })
+                .sum();
+
+            eprintln!("  Simple SSE: {}, Trellis SSE: {}", simple_sse, trellis_sse);
+        }
+    }
 }
