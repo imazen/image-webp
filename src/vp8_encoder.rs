@@ -718,18 +718,14 @@ impl<W: Write> Vp8Encoder<W> {
 
         plane = Plane::Chroma;
 
-        // Apply error diffusion to chroma if enabled
-        let mut u_diffused: [i32; 16 * 4] = *u_block_data;
-        let mut v_diffused: [i32; 16 * 4] = *v_block_data;
-        if self.do_error_diffusion {
-            self.apply_chroma_error_diffusion(&mut u_diffused, &mut v_diffused, mbx, &uv_matrix);
-        }
+        // Note: Error diffusion is already applied in transform_chroma_blocks
+        // so u_block_data and v_block_data contain the error-diffused values
 
         // encode the 4 u 4x4 subblocks
         for y in 0usize..2 {
             let mut left = self.left_complexity.u[y];
             for x in 0usize..2 {
-                let block = u_diffused[y * 2 * 16 + x * 16..][..16]
+                let block = u_block_data[y * 2 * 16 + x * 16..][..16]
                     .try_into()
                     .unwrap();
 
@@ -755,7 +751,7 @@ impl<W: Write> Vp8Encoder<W> {
         for y in 0usize..2 {
             let mut left = self.left_complexity.v[y];
             for x in 0usize..2 {
-                let block = v_diffused[y * 2 * 16 + x * 16..][..16]
+                let block = v_block_data[y * 2 * 16 + x * 16..][..16]
                     .try_into()
                     .unwrap();
 
@@ -2619,10 +2615,19 @@ impl<W: Write> Vp8Encoder<W> {
             &self.left_border_v,
         );
 
-        let u_blocks =
+        let mut u_blocks =
             self.get_chroma_blocks_from_predicted(&predicted_u, &self.frame.ubuf, mbx, mby);
-        let v_blocks =
+        let mut v_blocks =
             self.get_chroma_blocks_from_predicted(&predicted_v, &self.frame.vbuf, mbx, mby);
+
+        // Apply error diffusion to chroma BEFORE quantization for reconstruction.
+        // This must be done here so the same quantized values are used for both
+        // reconstruction (border updates) and encoding (bitstream).
+        let segment = self.get_segment_for_mb(mbx, mby);
+        let uv_matrix = segment.uv_matrix.clone().unwrap();
+        if self.do_error_diffusion {
+            self.apply_chroma_error_diffusion(&mut u_blocks, &mut v_blocks, mbx, &uv_matrix);
+        }
 
         let segment = self.get_segment_for_mb(mbx, mby);
         let u_coeffs = self.get_chroma_block_coeffs(u_blocks, segment);
