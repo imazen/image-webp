@@ -553,12 +553,27 @@ pub(crate) fn convert_image_y<const BPP: usize>(
     let u_bytes = vec![127u8; chroma_size];
     let v_bytes = vec![127u8; chroma_size];
 
-    for (image_row, y_row) in image_data
-        .chunks_exact(BPP * width)
-        .zip(y_bytes.chunks_exact_mut(luma_width))
-    {
-        for (image_value, y_pixel) in image_row.chunks_exact(BPP).zip(y_row.iter_mut()) {
-            *y_pixel = image_value[0];
+    // Process all source rows
+    for y in 0..height {
+        let src_row = &image_data[y * width * BPP..(y + 1) * width * BPP];
+        for x in 0..width {
+            y_bytes[y * luma_width + x] = src_row[x * BPP];
+        }
+    }
+
+    // Replicate edge pixels to fill macroblock padding
+    // Horizontal padding for Y
+    for y in 0..height {
+        let last_y = y_bytes[y * luma_width + width - 1];
+        for x in width..luma_width {
+            y_bytes[y * luma_width + x] = last_y;
+        }
+    }
+
+    // Vertical padding for Y (including horizontal padding area)
+    for y in height..(mb_height * 16) {
+        for x in 0..luma_width {
+            y_bytes[y * luma_width + x] = y_bytes[(height - 1) * luma_width + x];
         }
     }
 
