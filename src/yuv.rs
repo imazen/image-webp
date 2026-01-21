@@ -600,7 +600,8 @@ fn rgb_to_u_avg(rgb1: &[u8], rgb2: &[u8], rgb3: &[u8], rgb4: &[u8]) -> u8 {
     let u3 = rgb_to_u_raw(rgb3);
     let u4 = rgb_to_u_raw(rgb4);
 
-    ((u1 + u2 + u3 + u4) >> (YUV_FIX + 2)) as u8
+    // Add rounding before shift (matches libwebp's VP8ClipUV with YUV_HALF << 2)
+    ((u1 + u2 + u3 + u4 + (YUV_HALF << 2)) >> (YUV_FIX + 2)) as u8
 }
 
 // get the average of the four surrounding pixels
@@ -610,7 +611,8 @@ fn rgb_to_v_avg(rgb1: &[u8], rgb2: &[u8], rgb3: &[u8], rgb4: &[u8]) -> u8 {
     let v3 = rgb_to_v_raw(rgb3);
     let v4 = rgb_to_v_raw(rgb4);
 
-    ((v1 + v2 + v3 + v4) >> (YUV_FIX + 2)) as u8
+    // Add rounding before shift (matches libwebp's VP8ClipUV with YUV_HALF << 2)
+    ((v1 + v2 + v3 + v4 + (YUV_HALF << 2)) >> (YUV_FIX + 2)) as u8
 }
 
 fn rgb_to_u_raw(rgb: &[u8]) -> i32 {
