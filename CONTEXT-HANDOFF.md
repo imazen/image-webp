@@ -12,15 +12,29 @@ d796260 fix: compute optimized segment tree probabilities
 a25cd9e fix: use lambda_mode and BMODE_COST for I4 scoring
 ```
 
-### Current Benchmark Results (kodak/1.png)
+### Current Benchmark Results (Full Kodak Corpus, 24 images)
+
+**Size comparison at same quality setting:**
 ```
-Q50: 95.6%  (smaller than libwebp!)
-Q75: 98.8%  (smaller than libwebp!)
-Q90: 103.6%
-Q95: 103.4%
+Q50: 99.2%  (smaller than libwebp)
+Q75: 100.6%
+Q90: 101.7%
+Q95: 104.0%
 ```
 
-Average PSNR at equal BPP: -0.85 dB (was -1.07 dB before record_coeffs fix)
+**SSIMULACRA2 at equal BPP (apples-to-apples):**
+```
+BPP 0.25: -2.53 SSIM2 (noticeably worse at very low bitrate)
+BPP 0.50: -0.02 SSIM2 (essentially equivalent)
+BPP 0.75: -0.05 SSIM2 (essentially equivalent)
+BPP 1.00: -0.19 SSIM2 (essentially equivalent)
+BPP 1.50: -0.94 SSIM2 (slightly worse)
+BPP 2.00: -1.16 SSIM2 (slightly worse)
+BPP 3.00: -1.18 SSIM2 (slightly worse)
+BPP 4.00: -0.88 SSIM2 (slightly worse)
+```
+
+Average SSIMULACRA2 difference at equal BPP: -0.69
 
 ## Key Finding: Statistics Collection Fix
 

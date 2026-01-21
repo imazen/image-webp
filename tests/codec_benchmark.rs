@@ -2,29 +2,60 @@
 //!
 //! Uses the Kodak image corpus for standardized comparison.
 //! Measures quality at equal bits-per-pixel for apples-to-apples comparison.
+//! Uses SSIMULACRA2 for perceptual quality measurement (higher = better).
 
+use fast_ssim2::{compute_frame_ssimulacra2, ColorPrimaries, Rgb, TransferCharacteristic};
 use image_webp::{ColorType, EncoderParams, WebPEncoder};
 use std::path::Path;
 
 const KODAK_PATH: &str = concat!(env!("HOME"), "/work/codec-corpus/kodak");
 
-/// Calculate PSNR between two images
-fn psnr(original: &[u8], decoded: &[u8]) -> f64 {
-    assert_eq!(original.len(), decoded.len());
-    let mse: f64 = original
-        .iter()
-        .zip(decoded.iter())
-        .map(|(&a, &b)| {
-            let diff = f64::from(a) - f64::from(b);
-            diff * diff
-        })
-        .sum::<f64>()
-        / original.len() as f64;
+/// Calculate SSIMULACRA2 between two RGB images
+/// Returns score where: 90+ = excellent, 70-90 = good, 50-70 = acceptable, <50 = poor
+fn ssim2(original: &[u8], decoded: &[u8], width: u32, height: u32) -> f64 {
+    let w = width as usize;
+    let h = height as usize;
 
-    if mse < 0.0001 {
-        return 99.0; // Cap at 99 dB for near-identical
+    // sRGB gamma decode
+    fn srgb_to_linear(v: u8) -> f32 {
+        let v = v as f32 / 255.0;
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
     }
-    10.0 * (255.0 * 255.0 / mse).log10()
+
+    // Convert to linear RGB f32 format
+    let orig_rgb: Vec<[f32; 3]> = original
+        .chunks_exact(3)
+        .map(|p| [srgb_to_linear(p[0]), srgb_to_linear(p[1]), srgb_to_linear(p[2])])
+        .collect();
+
+    let dec_rgb: Vec<[f32; 3]> = decoded
+        .chunks_exact(3)
+        .map(|p| [srgb_to_linear(p[0]), srgb_to_linear(p[1]), srgb_to_linear(p[2])])
+        .collect();
+
+    let orig_img = Rgb::new(
+        orig_rgb,
+        w,
+        h,
+        TransferCharacteristic::Linear,
+        ColorPrimaries::BT709,
+    )
+    .unwrap();
+
+    let dec_img = Rgb::new(
+        dec_rgb,
+        w,
+        h,
+        TransferCharacteristic::Linear,
+        ColorPrimaries::BT709,
+    )
+    .unwrap();
+
+    compute_frame_ssimulacra2(orig_img, dec_img).unwrap_or(0.0)
 }
 
 /// Load a PNG image and return RGB data
@@ -82,7 +113,7 @@ struct EncodeResult {
     quality: u8,
     size_bytes: usize,
     bpp: f64,
-    psnr: f64,
+    ssim2: f64, // SSIMULACRA2 score (higher = better)
 }
 
 /// Benchmark results for one image
@@ -110,25 +141,25 @@ fn benchmark_image(path: &Path) -> Option<ImageResults> {
         // Our encoder
         let our_data = encode_ours(&rgb, width, height, q);
         let our_decoded = decode_webp(&our_data);
-        let our_psnr = psnr(&rgb, &our_decoded);
+        let our_ssim2 = ssim2(&rgb, &our_decoded, width, height);
         let our_bpp = (our_data.len() * 8) as f64 / pixels as f64;
         ours.push(EncodeResult {
             quality: q,
             size_bytes: our_data.len(),
             bpp: our_bpp,
-            psnr: our_psnr,
+            ssim2: our_ssim2,
         });
 
         // libwebp
         let lib_data = encode_libwebp(&rgb, width, height, q as f32);
         let lib_decoded = decode_webp(&lib_data);
-        let lib_psnr = psnr(&rgb, &lib_decoded);
+        let lib_ssim2 = ssim2(&rgb, &lib_decoded, width, height);
         let lib_bpp = (lib_data.len() * 8) as f64 / pixels as f64;
         libwebp_results.push(EncodeResult {
             quality: q,
             size_bytes: lib_data.len(),
             bpp: lib_bpp,
-            psnr: lib_psnr,
+            ssim2: lib_ssim2,
         });
     }
 
@@ -151,8 +182,8 @@ fn find_quality_for_bpp(results: &[EncodeResult], target_bpp: f64) -> Option<&En
     })
 }
 
-/// Interpolate PSNR at exact BPP using linear interpolation
-fn interpolate_psnr_at_bpp(results: &[EncodeResult], target_bpp: f64) -> Option<f64> {
+/// Interpolate SSIM2 at exact BPP using linear interpolation
+fn interpolate_ssim2_at_bpp(results: &[EncodeResult], target_bpp: f64) -> Option<f64> {
     // Sort by BPP
     let mut sorted: Vec<_> = results.iter().collect();
     sorted.sort_by(|a, b| a.bpp.partial_cmp(&b.bpp).unwrap());
@@ -161,15 +192,15 @@ fn interpolate_psnr_at_bpp(results: &[EncodeResult], target_bpp: f64) -> Option<
     for i in 0..sorted.len() - 1 {
         if sorted[i].bpp <= target_bpp && sorted[i + 1].bpp >= target_bpp {
             let t = (target_bpp - sorted[i].bpp) / (sorted[i + 1].bpp - sorted[i].bpp);
-            return Some(sorted[i].psnr + t * (sorted[i + 1].psnr - sorted[i].psnr));
+            return Some(sorted[i].ssim2 + t * (sorted[i + 1].ssim2 - sorted[i].ssim2));
         }
     }
 
     // Extrapolate if outside range
     if target_bpp < sorted[0].bpp {
-        Some(sorted[0].psnr)
+        Some(sorted[0].ssim2)
     } else if target_bpp > sorted.last()?.bpp {
-        Some(sorted.last()?.psnr)
+        Some(sorted.last()?.ssim2)
     } else {
         None
     }
@@ -201,10 +232,10 @@ fn codec_benchmark_kodak() {
         }
     }
 
-    println!("\n=== Per-Quality Comparison ===\n");
+    println!("\n=== Per-Quality Comparison (SSIMULACRA2 - higher is better) ===\n");
     println!(
         "{:>5} | {:>10} {:>8} {:>8} | {:>10} {:>8} {:>8} | {:>8} {:>8}",
-        "Q", "Ours Size", "BPP", "PSNR", "libwebp", "BPP", "PSNR", "Size %", "PSNR Δ"
+        "Q", "Ours Size", "BPP", "SSIM2", "libwebp", "BPP", "SSIM2", "Size %", "SSIM2 Δ"
     );
     println!("{}", "-".repeat(95));
 
@@ -212,61 +243,61 @@ fn codec_benchmark_kodak() {
     for (qi, &q) in qualities.iter().enumerate() {
         let mut our_total_size = 0usize;
         let mut lib_total_size = 0usize;
-        let mut our_total_psnr = 0.0f64;
-        let mut lib_total_psnr = 0.0f64;
+        let mut our_total_ssim2 = 0.0f64;
+        let mut lib_total_ssim2 = 0.0f64;
         let mut total_pixels = 0u64;
 
         for result in &all_results {
             our_total_size += result.ours[qi].size_bytes;
             lib_total_size += result.libwebp[qi].size_bytes;
-            our_total_psnr += result.ours[qi].psnr;
-            lib_total_psnr += result.libwebp[qi].psnr;
+            our_total_ssim2 += result.ours[qi].ssim2;
+            lib_total_ssim2 += result.libwebp[qi].ssim2;
             total_pixels += result.pixels as u64;
         }
 
         let our_avg_bpp = (our_total_size * 8) as f64 / total_pixels as f64;
         let lib_avg_bpp = (lib_total_size * 8) as f64 / total_pixels as f64;
-        let our_avg_psnr = our_total_psnr / all_results.len() as f64;
-        let lib_avg_psnr = lib_total_psnr / all_results.len() as f64;
+        let our_avg_ssim2 = our_total_ssim2 / all_results.len() as f64;
+        let lib_avg_ssim2 = lib_total_ssim2 / all_results.len() as f64;
         let size_ratio = 100.0 * our_total_size as f64 / lib_total_size as f64;
-        let psnr_diff = our_avg_psnr - lib_avg_psnr;
+        let ssim2_diff = our_avg_ssim2 - lib_avg_ssim2;
 
         println!(
             "{:>5} | {:>10} {:>8.3} {:>8.2} | {:>10} {:>8.3} {:>8.2} | {:>7.1}% {:>+8.2}",
             q,
             our_total_size,
             our_avg_bpp,
-            our_avg_psnr,
+            our_avg_ssim2,
             lib_total_size,
             lib_avg_bpp,
-            lib_avg_psnr,
+            lib_avg_ssim2,
             size_ratio,
-            psnr_diff
+            ssim2_diff
         );
     }
 
     println!("\n=== Quality at Equal BPP (Apples-to-Apples) ===\n");
     println!(
         "{:>8} | {:>8} {:>8} | {:>8} {:>8} | {:>8}",
-        "BPP", "Ours Q", "PSNR", "libwebp Q", "PSNR", "PSNR Δ"
+        "BPP", "Ours Q", "SSIM2", "libwebp Q", "SSIM2", "SSIM2 Δ"
     );
     println!("{}", "-".repeat(65));
 
     let target_bpps = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0];
     for &target_bpp in &target_bpps {
-        let mut our_psnr_sum = 0.0f64;
-        let mut lib_psnr_sum = 0.0f64;
+        let mut our_ssim2_sum = 0.0f64;
+        let mut lib_ssim2_sum = 0.0f64;
         let mut our_q_sum = 0u32;
         let mut lib_q_sum = 0u32;
         let mut count = 0u32;
 
         for result in &all_results {
-            if let (Some(our_psnr), Some(lib_psnr)) = (
-                interpolate_psnr_at_bpp(&result.ours, target_bpp),
-                interpolate_psnr_at_bpp(&result.libwebp, target_bpp),
+            if let (Some(our_ssim2), Some(lib_ssim2)) = (
+                interpolate_ssim2_at_bpp(&result.ours, target_bpp),
+                interpolate_ssim2_at_bpp(&result.libwebp, target_bpp),
             ) {
-                our_psnr_sum += our_psnr;
-                lib_psnr_sum += lib_psnr;
+                our_ssim2_sum += our_ssim2;
+                lib_ssim2_sum += lib_ssim2;
 
                 if let Some(our_r) = find_quality_for_bpp(&result.ours, target_bpp) {
                     our_q_sum += our_r.quality as u32;
@@ -279,59 +310,60 @@ fn codec_benchmark_kodak() {
         }
 
         if count > 0 {
-            let our_avg_psnr = our_psnr_sum / count as f64;
-            let lib_avg_psnr = lib_psnr_sum / count as f64;
+            let our_avg_ssim2 = our_ssim2_sum / count as f64;
+            let lib_avg_ssim2 = lib_ssim2_sum / count as f64;
             let our_avg_q = our_q_sum / count;
             let lib_avg_q = lib_q_sum / count;
-            let psnr_diff = our_avg_psnr - lib_avg_psnr;
+            let ssim2_diff = our_avg_ssim2 - lib_avg_ssim2;
 
             println!(
                 "{:>8.2} | {:>8} {:>8.2} | {:>9} {:>8.2} | {:>+8.2}",
-                target_bpp, our_avg_q, our_avg_psnr, lib_avg_q, lib_avg_psnr, psnr_diff
+                target_bpp, our_avg_q, our_avg_ssim2, lib_avg_q, lib_avg_ssim2, ssim2_diff
             );
         }
     }
 
     println!("\n=== Summary ===\n");
 
-    // Calculate BD-rate style metric (simplified)
-    // Average PSNR difference at common BPP points
-    let mut psnr_diffs = Vec::new();
+    // Average SSIMULACRA2 difference at common BPP points
+    let mut ssim2_diffs = Vec::new();
     for &target_bpp in &[0.5, 1.0, 1.5, 2.0, 3.0] {
         let mut our_sum = 0.0f64;
         let mut lib_sum = 0.0f64;
         let mut count = 0u32;
 
         for result in &all_results {
-            if let (Some(our_p), Some(lib_p)) = (
-                interpolate_psnr_at_bpp(&result.ours, target_bpp),
-                interpolate_psnr_at_bpp(&result.libwebp, target_bpp),
+            if let (Some(our_s), Some(lib_s)) = (
+                interpolate_ssim2_at_bpp(&result.ours, target_bpp),
+                interpolate_ssim2_at_bpp(&result.libwebp, target_bpp),
             ) {
-                our_sum += our_p;
-                lib_sum += lib_p;
+                our_sum += our_s;
+                lib_sum += lib_s;
                 count += 1;
             }
         }
         if count > 0 {
-            psnr_diffs.push(our_sum / count as f64 - lib_sum / count as f64);
+            ssim2_diffs.push(our_sum / count as f64 - lib_sum / count as f64);
         }
     }
 
-    let avg_psnr_diff: f64 = psnr_diffs.iter().sum::<f64>() / psnr_diffs.len() as f64;
+    let avg_ssim2_diff: f64 = ssim2_diffs.iter().sum::<f64>() / ssim2_diffs.len() as f64;
     println!(
-        "Average PSNR difference at equal BPP: {:+.2} dB",
-        avg_psnr_diff
+        "Average SSIMULACRA2 difference at equal BPP: {:+.2}",
+        avg_ssim2_diff
     );
 
-    if avg_psnr_diff < -1.0 {
+    // SSIMULACRA2 scale: 90+ excellent, 70-90 good, 50-70 acceptable
+    // A difference of +/-3 is quite significant
+    if avg_ssim2_diff < -3.0 {
         println!("Status: SIGNIFICANTLY WORSE than libwebp");
-    } else if avg_psnr_diff < -0.5 {
+    } else if avg_ssim2_diff < -1.0 {
         println!("Status: Noticeably worse than libwebp");
-    } else if avg_psnr_diff < 0.0 {
+    } else if avg_ssim2_diff < 0.0 {
         println!("Status: Slightly worse than libwebp");
-    } else if avg_psnr_diff < 0.5 {
+    } else if avg_ssim2_diff < 1.0 {
         println!("Status: Comparable to libwebp");
     } else {
-        println!("Status: Better than libwebp (verify this is real!)");
+        println!("Status: Better than libwebp!");
     }
 }
