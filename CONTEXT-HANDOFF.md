@@ -6,10 +6,11 @@ The lossy VP8 encoder has been significantly improved. At low-to-medium quality 
 
 ### Recent Commits
 ```
+6107aa3 fix: also handle edge padding in convert_image_y (grayscale)
+e227645 fix: handle odd width/height in RGB to YUV conversion
+fa01c4b fix: use correct fast_ssim2 API in codec benchmark
 c919521 fix: align record_coeffs with encoder's skip_eob pattern
 d796260 fix: compute optimized segment tree probabilities
-85be0ee fix: always use two-pass encoding for better compression
-a25cd9e fix: use lambda_mode and BMODE_COST for I4 scoring
 ```
 
 ### Current Benchmark Results (Full Kodak Corpus, 24 images)
@@ -50,6 +51,29 @@ the encoder's coefficient encoding pattern. Specifically:
    - Do NOT reset skip_eob after non-zeros (encoder leaves it unchanged)
 
 This fix improved compression significantly, especially at lower quality settings.
+
+## Key Finding: Edge Handling Bug (FIXED)
+
+The RGB to YUV conversion function `convert_image_yuv` had a critical bug with non-16-aligned image dimensions:
+
+1. **BUG**: Used `chunks_exact` which ignored remainder pixels when width/height wasn't a multiple of 2
+2. **EFFECT**: Edge pixels were left as 0 (uninitialized) in the YUV buffer
+3. **SYMPTOM**: Catastrophic SSIMULACRA2 scores (-100 to -700) for 1-pixel edges
+
+**Fix** (commit e227645):
+- Process odd width column separately, duplicating horizontally for chroma averaging
+- Process odd height row separately, duplicating vertically for chroma averaging
+- Handle corner case where both width and height are odd
+- Replicate edge pixels to fill macroblock padding (width to luma_width, height to luma_height)
+
+**Before fix**: 257x256 image edge had Blue channel = 0 for all rows
+**After fix**: Blue channel correctly follows source pattern
+
+**Edge tile test results at Q90:**
+- Before: Average -9.68 vs libwebp 85.54 (diff **-95.22**)
+- After: Average 84.72 vs libwebp 85.54 (diff **-0.82**)
+
+New test added: `tests/edge_tile_ssim2_comparison.rs`
 
 ## Remaining Areas to Investigate (for high quality Q90+)
 
