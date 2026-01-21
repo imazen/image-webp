@@ -12,7 +12,7 @@ use crate::vp8_cost::{
     ProbaStats, TokenType, FIXED_COSTS_I16, FIXED_COSTS_UV,
 };
 // Intra4 imports for coefficient-level cost estimation (used in pick_best_intra4)
-use crate::vp8_cost::{calc_i4_penalty, get_i4_mode_cost};
+use crate::vp8_cost::get_i4_mode_cost;
 // Full RD imports for spectral distortion and flat source detection
 use crate::vp8_cost::{
     get_cost_luma16, get_cost_uv, is_flat_coeffs, is_flat_source_16, tdisto_16x16,
@@ -1775,16 +1775,19 @@ impl<W: Write> Vp8Encoder<W> {
 
         let segment = self.get_segment_for_mb(mbx, mby);
 
-        // Get quantizer-dependent lambda for I4 mode RD scoring
+        // Get quantizer-dependent lambdas for I4 mode RD scoring
+        // lambda_i4 is used for selecting the best mode within each block
+        // lambda_mode is used for accumulation and comparison against I16 score
+        // (This matches libwebp's SetRDScore flow in PickBestIntra4)
         let lambda_i4 = segment.lambda_i4;
+        let lambda_mode = segment.lambda_mode;
 
-        // Compute i4_penalty using averaged quantizer step value (matching libwebp)
-        // libwebp uses q_i4 from ExpandMatrix which returns avg of y1 matrix values
-        let q_i4 = segment.y1_matrix.as_ref().unwrap().average_q();
-
-        // Start with i4_penalty to account for typically higher I4 mode signaling cost.
-        // This matches libwebp: i4_penalty = 1000 * q * q
-        let mut running_score = calc_i4_penalty(q_i4);
+        // Initialize I4 running score with the BMODE_COST penalty (211 in 1/256 bits)
+        // matching libwebp's PickBestIntra4: rd_best.H = 211; SetRDScore(lambda_mode, &rd_best);
+        // This is the fixed overhead cost for signaling that we're using I4 mode.
+        const BMODE_COST: u64 = 211;
+        let initial_penalty = BMODE_COST * u64::from(lambda_mode);
+        let mut running_score = initial_penalty;
 
         // Track total mode cost for header bit limiting
         let mut total_mode_cost = 0u32;
@@ -1828,6 +1831,9 @@ impl<W: Write> Vp8Encoder<W> {
                 let mut best_block_score = u64::MAX;
                 let mut best_has_nz = false;
                 let mut best_quantized = [0i32; 16];
+                // Track best block's SSE and rate for recalculating with lambda_mode
+                let mut best_sse = 0u32;
+                let mut best_rate = 0u32;
 
                 // Try each mode and pick the best
                 for (mode_idx, &mode) in MODES.iter().enumerate() {
@@ -1893,6 +1899,8 @@ impl<W: Write> Vp8Encoder<W> {
                         best_mode_idx = mode_idx;
                         best_has_nz = has_nz;
                         best_quantized = quantized;
+                        best_sse = sse;
+                        best_rate = total_rate;
                     }
                 }
 
@@ -1906,8 +1914,13 @@ impl<W: Write> Vp8Encoder<W> {
                 let mode_cost = get_i4_mode_cost(top_ctx, left_ctx, best_mode_idx);
                 total_mode_cost += u32::from(mode_cost);
 
+                // Recalculate the block score with lambda_mode for accumulation
+                // (matching libwebp's SetRDScore(lambda_mode, &rd_i4) before AddScore)
+                let block_score_for_comparison =
+                    vp8_cost::rd_score(best_sse, best_rate as u16, lambda_mode);
+
                 // Add this block's score to running total
-                running_score += best_block_score;
+                running_score += block_score_for_comparison;
 
                 // Early-exit: if I4 already exceeds I16, bail out
                 if running_score >= i16_score {
