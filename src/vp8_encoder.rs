@@ -12,7 +12,7 @@ use crate::vp8_cost::{
     ProbaStats, TokenType, FIXED_COSTS_I16, FIXED_COSTS_UV,
 };
 // Intra4 imports for coefficient-level cost estimation (used in pick_best_intra4)
-use crate::vp8_cost::{calc_i4_penalty, get_i4_mode_cost, LAMBDA_I4};
+use crate::vp8_cost::{calc_i4_penalty, get_i4_mode_cost};
 // Full RD imports for spectral distortion and flat source detection
 use crate::vp8_cost::{
     get_cost_luma16, get_cost_uv, is_flat_coeffs, is_flat_source_16, tdisto_16x16,
@@ -1778,6 +1778,9 @@ impl<W: Write> Vp8Encoder<W> {
         // Get quant index for i4_penalty calculation
         let quant_index = segment.quant_index as u32;
 
+        // Get quantizer-dependent lambda for I4 mode RD scoring
+        let lambda_i4 = segment.lambda_i4;
+
         // Start with i4_penalty to account for typically higher I4 mode signaling cost.
         // This matches libwebp: i4_penalty = 1000 * q * q
         let mut running_score = calc_i4_penalty(quant_index);
@@ -1881,7 +1884,7 @@ impl<W: Write> Vp8Encoder<W> {
                     // Compute RD score: distortion + lambda * (mode_cost + coeff_cost)
                     let mode_cost = get_i4_mode_cost(top_ctx, left_ctx, mode_idx);
                     let total_rate = u32::from(mode_cost) + coeff_cost;
-                    let rd_score = vp8_cost::rd_score(sse, total_rate as u16, LAMBDA_I4);
+                    let rd_score = vp8_cost::rd_score(sse, total_rate as u16, lambda_i4);
 
                     if rd_score < best_block_score {
                         best_block_score = rd_score;
