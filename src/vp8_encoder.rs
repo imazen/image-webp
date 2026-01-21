@@ -2239,9 +2239,38 @@ impl<W: Write> Vp8Encoder<W> {
             self.segments[seg_idx] = segment;
         }
 
+        // Compute segment tree probabilities from actual distribution
+        // This matches libwebp's SetSegmentProbas
+        let mut seg_counts = [0u32; 4];
+        for &seg_id in &self.segment_map {
+            seg_counts[seg_id as usize] += 1;
+        }
+
+        // Segment tree uses 3 probabilities for binary splits:
+        // prob[0] = P(segment < 2), prob[1] = P(segment == 0 | segment < 2)
+        // prob[2] = P(segment == 2 | segment >= 2)
+        let get_proba = |a: u32, b: u32| -> u8 {
+            let total = a + b;
+            if total == 0 {
+                255 // default
+            } else {
+                ((255 * a + total / 2) / total) as u8
+            }
+        };
+
+        self.segment_tree_probs[0] =
+            get_proba(seg_counts[0] + seg_counts[1], seg_counts[2] + seg_counts[3]);
+        self.segment_tree_probs[1] = get_proba(seg_counts[0], seg_counts[1]);
+        self.segment_tree_probs[2] = get_proba(seg_counts[2], seg_counts[3]);
+
+        // Only enable update_map if probabilities differ from default (255)
+        let should_update_map = self.segment_tree_probs[0] != 255
+            || self.segment_tree_probs[1] != 255
+            || self.segment_tree_probs[2] != 255;
+
         // Enable segment-based encoding
         self.segments_enabled = true;
-        self.segments_update_map = true;
+        self.segments_update_map = should_update_map;
 
         // Reset borders for actual encoding pass
         self.left_border_y = [129u8; 16 + 1];
