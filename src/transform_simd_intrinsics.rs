@@ -115,14 +115,14 @@ unsafe fn dct4x4_sse2(block: &mut [i32; 16]) {
     // row01 = [r0c0, r0c1, r1c0, r1c1, r0c2, r0c3, r1c2, r1c3]
     // row23 = [r2c0, r2c1, r3c0, r3c1, r2c2, r2c3, r3c2, r3c3]
     let row01 = _mm_set_epi16(
-        block[7] as i16,  // r1c3
-        block[6] as i16,  // r1c2
-        block[3] as i16,  // r0c3
-        block[2] as i16,  // r0c2
-        block[5] as i16,  // r1c1
-        block[4] as i16,  // r1c0
-        block[1] as i16,  // r0c1
-        block[0] as i16,  // r0c0
+        block[7] as i16, // r1c3
+        block[6] as i16, // r1c2
+        block[3] as i16, // r0c3
+        block[2] as i16, // r0c2
+        block[5] as i16, // r1c1
+        block[4] as i16, // r1c0
+        block[1] as i16, // r0c1
+        block[0] as i16, // r0c0
     );
     let row23 = _mm_set_epi16(
         block[15] as i16, // r3c3
@@ -259,7 +259,6 @@ unsafe fn ftransform_pass2_i16(v01: &__m128i, v32: &__m128i, out: &mut [i16; 16]
     _mm_storeu_si128(out.as_mut_ptr().add(0) as *mut __m128i, d0_g1);
     _mm_storeu_si128(out.as_mut_ptr().add(8) as *mut __m128i, d2_f3);
 }
-
 
 /// Process two blocks at once
 #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
@@ -566,10 +565,18 @@ mod benchmarks {
     use test::Bencher;
 
     const TEST_BLOCKS: [[i32; 16]; 4] = [
-        [38, 6, 210, 107, 42, 125, 185, 151, 241, 224, 125, 233, 227, 8, 57, 96],
-        [100, 50, 25, 75, 200, 150, 100, 50, 25, 75, 125, 175, 225, 200, 150, 100],
-        [12, 34, 56, 78, 90, 12, 34, 56, 78, 90, 12, 34, 56, 78, 90, 12],
-        [255, 0, 128, 64, 192, 32, 224, 16, 240, 8, 248, 4, 252, 2, 254, 1],
+        [
+            38, 6, 210, 107, 42, 125, 185, 151, 241, 224, 125, 233, 227, 8, 57, 96,
+        ],
+        [
+            100, 50, 25, 75, 200, 150, 100, 50, 25, 75, 125, 175, 225, 200, 150, 100,
+        ],
+        [
+            12, 34, 56, 78, 90, 12, 34, 56, 78, 90, 12, 34, 56, 78, 90, 12,
+        ],
+        [
+            255, 0, 128, 64, 192, 32, 224, 16, 240, 8, 248, 4, 252, 2, 254, 1,
+        ],
     ];
 
     #[bench]

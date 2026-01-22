@@ -101,10 +101,10 @@ pub(crate) fn dct4x4_simd(block: &mut [i32; 16]) {
     let row3 = i32x4::new([block[12], block[13], block[14], block[15]]);
 
     // Butterfly operations on columns (all 4 columns in parallel)
-    let a = row0 + row3;  // v0 + v3 for all columns
-    let b = row1 + row2;  // v1 + v2 for all columns
-    let c = row1 - row2;  // v1 - v2 for all columns
-    let d = row0 - row3;  // v0 - v3 for all columns
+    let a = row0 + row3; // v0 + v3 for all columns
+    let b = row1 + row2; // v1 + v2 for all columns
+    let c = row1 - row2; // v1 - v2 for all columns
+    let d = row0 - row3; // v0 - v3 for all columns
 
     // out0 = (a + b + 7) >> 4
     let seven = i32x4::splat(7);
@@ -342,10 +342,18 @@ mod benchmarks {
     use test::Bencher;
 
     const TEST_BLOCKS: [[i32; 16]; 4] = [
-        [38, 6, 210, 107, 42, 125, 185, 151, 241, 224, 125, 233, 227, 8, 57, 96],
-        [100, 50, 25, 75, 200, 150, 100, 50, 25, 75, 125, 175, 225, 200, 150, 100],
-        [12, 34, 56, 78, 90, 12, 34, 56, 78, 90, 12, 34, 56, 78, 90, 12],
-        [255, 0, 128, 64, 192, 32, 224, 16, 240, 8, 248, 4, 252, 2, 254, 1],
+        [
+            38, 6, 210, 107, 42, 125, 185, 151, 241, 224, 125, 233, 227, 8, 57, 96,
+        ],
+        [
+            100, 50, 25, 75, 200, 150, 100, 50, 25, 75, 125, 175, 225, 200, 150, 100,
+        ],
+        [
+            12, 34, 56, 78, 90, 12, 34, 56, 78, 90, 12, 34, 56, 78, 90, 12,
+        ],
+        [
+            255, 0, 128, 64, 192, 32, 224, 16, 240, 8, 248, 4, 252, 2, 254, 1,
+        ],
     ];
 
     #[bench]

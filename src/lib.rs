@@ -22,13 +22,13 @@ mod huffman;
 mod loop_filter;
 mod lossless;
 mod lossless_transform;
+#[cfg(feature = "unsafe-simd")]
+mod simd_sse;
 mod transform;
 #[cfg(feature = "simd")]
 mod transform_simd;
 #[cfg(feature = "unsafe-simd")]
 mod transform_simd_intrinsics;
-#[cfg(feature = "unsafe-simd")]
-mod simd_sse;
 mod vp8_arithmetic_decoder;
 mod vp8_arithmetic_encoder;
 mod vp8_common;
