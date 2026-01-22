@@ -45,16 +45,16 @@ See global ~/.claude/CLAUDE.md for general instructions.
 
 | Test | Our Decoder | libwebp | Speed Ratio |
 |------|-------------|---------|-------------|
-| libwebp-encoded | 8.40ms (46.8 MPix/s) | 3.26ms (120.6 MPix/s) | 2.58x slower |
-| our-encoded | 8.45ms (46.5 MPix/s) | 3.36ms (117.0 MPix/s) | 2.51x slower |
+| libwebp-encoded | 7.2ms (55 MPix/s) | 2.8ms (140 MPix/s) | 2.6x slower |
+| our-encoded | 6.9ms (57 MPix/s) | 2.7ms (144 MPix/s) | 2.5x slower |
 
 *Benchmark: 768x512 Kodak image, 100 iterations, release mode*
 
-Our decoder is ~2.5x slower than libwebp. This is expected for a pure Rust
-implementation without SIMD. Key areas for optimization:
-- IDCT reconstruction (SIMD)
-- Boolean arithmetic decoding
-- Loop filter application
+Our decoder is ~2.5x slower than libwebp. Key bottleneck is the boolean
+arithmetic decoder (~24% of time). Recent optimizations:
+- Lookup table for range normalization (replaces leading_zeros computation)
+- SIMD fancy upsampling for YUV→RGB conversion
+- AVX2 loop filter (16 pixels at once) - not yet fully integrated
 
 ### Decoder Profiler Hot Spots
 | Function | % Time | Notes |
@@ -67,18 +67,22 @@ implementation without SIMD. Key areas for optimization:
 | Loop filter total | ~15% | Multiple functions |
 
 ### SIMD Decoder Optimizations
-- `src/yuv_simd.rs` - SSE4.1 YUV→RGB (8 pixels at once)
-  - **Integrated** for Simple upsampling mode (non-default)
-  - Uses exact same formula as scalar code (bit-exact)
+- `src/yuv_simd.rs` - SSE4.1 YUV→RGB with fancy upsampling
+  - **Integrated** for both Simple and Fancy (bilinear) upsampling modes
+  - Uses `_mm_avg_epu8` for efficient bilinear interpolation
   - Feature-gated: `unsafe-simd` feature + x86_64 + SSE4.1 detected
-- `src/loop_filter_simd.rs` - SSE4.1 loop filter (4 edges at once)
-  - **Not integrated** - requires restructuring decoder to batch operations
+- `src/loop_filter_avx2.rs` - SSE4.1 loop filter (16 pixels at once)
+  - Uses transpose technique for horizontal filtering
+  - Integrated for simple filter path, not yet for normal filter
+- `src/vp8_arithmetic_decoder.rs` - Lookup table for range normalization
+  - VP8_SHIFT_TABLE replaces `leading_zeros()` computation
+  - ~15% speedup in arithmetic decoding
 
 ### TODO
-- [ ] Integrate SIMD loop filter into decoder (requires batching)
-- [ ] Add SIMD YUV for Bilinear (fancy) upsampling (default mode)
+- [ ] Integrate SIMD normal/macroblock filter (DoFilter4/DoFilter6)
 - [ ] Consider SIMD for choose_macroblock_info inner loops (encoder)
 - [ ] Profile get_residual_cost for optimization opportunities
+- [ ] Explore batch coefficient reading to reduce FastDecoder overhead
 
 ## Known Bugs
 
