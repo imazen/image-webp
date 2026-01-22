@@ -45,26 +45,24 @@ See global ~/.claude/CLAUDE.md for general instructions.
 
 | Test | Our Decoder | libwebp | Speed Ratio |
 |------|-------------|---------|-------------|
-| libwebp-encoded | 7.2ms (55 MPix/s) | 2.8ms (140 MPix/s) | 2.6x slower |
-| our-encoded | 6.9ms (57 MPix/s) | 2.7ms (144 MPix/s) | 2.5x slower |
+| libwebp-encoded | 6.4ms (62 MPix/s) | 2.9ms (137 MPix/s) | 2.2x slower |
+| our-encoded | 6.1ms (64 MPix/s) | 2.9ms (135 MPix/s) | 2.1x slower |
 
 *Benchmark: 768x512 Kodak image, 100 iterations, release mode*
 
-Our decoder is ~2.5x slower than libwebp. Key bottleneck is the boolean
-arithmetic decoder (~24% of time). Recent optimizations:
-- Lookup table for range normalization (replaces leading_zeros computation)
+Our decoder is ~2.1-2.2x slower than libwebp (improved from 2.5x). Recent optimizations:
+- **libwebp-rs style bit reader for coefficients** (16% speedup, commit 5588e44)
 - SIMD fancy upsampling for YUV→RGB conversion
-- AVX2 loop filter (16 pixels at once) - not yet fully integrated
+- AVX2 loop filter (16 pixels at once) - simple filter only
 
-### Decoder Profiler Hot Spots
+### Decoder Profiler Hot Spots (after libwebp-rs bit reader)
 | Function | % Time | Notes |
 |----------|--------|-------|
-| read_with_tree_with_first_node | 23.77% | Arithmetic decoder (hard to SIMD) |
-| should_filter_vertical | 4.98% | Loop filter threshold check |
-| fill_row_fancy_with_2_uv_rows | 4.13% | YUV upsampling + conversion |
-| subblock_filter_horizontal | 4.10% | Loop filter application |
-| idct4x4_simd | 3.73% | Already SIMD |
-| Loop filter total | ~15% | Multiple functions |
+| read_coefficients | 18.85% | Coefficient decoding (down from 24%) |
+| idct4x4_avx512 | 6.05% | Already SIMD |
+| should_filter_vertical | 5.56% | Loop filter threshold check |
+| decode_frame_ | 5.20% | Frame processing overhead |
+| Loop filter total | ~12% | Multiple functions |
 
 ### SIMD Decoder Optimizations
 - `src/yuv_simd.rs` - SSE4.1 YUV→RGB with fancy upsampling
@@ -74,12 +72,14 @@ arithmetic decoder (~24% of time). Recent optimizations:
 - `src/loop_filter_avx2.rs` - SSE4.1 loop filter (16 pixels at once)
   - Uses transpose technique for horizontal filtering
   - Integrated for simple filter path, not yet for normal filter
-- `src/vp8_arithmetic_decoder.rs` - Lookup table for range normalization
-  - VP8_SHIFT_TABLE replaces `leading_zeros()` computation
-  - ~15% speedup in arithmetic decoding
+- `src/vp8_bit_reader.rs` - libwebp-rs style bit reader for coefficients
+  - Uses VP8GetBitAlt algorithm with 56-bit buffer
+  - `leading_zeros()` for normalization (single LZCNT instruction)
+  - **16% speedup** in overall decode (commit 5588e44)
 
 ### TODO
-- [ ] Integrate SIMD normal/macroblock filter (DoFilter4/DoFilter6) - ~11% opportunity
+- [ ] Integrate SIMD normal/macroblock filter (DoFilter4/DoFilter6) - ~12% opportunity
+- [ ] Consider using libwebp-rs bit reader for mode parsing too (self.b field)
 - [ ] Consider SIMD for choose_macroblock_info inner loops (encoder)
 - [ ] Profile get_residual_cost for optimization opportunities
 
@@ -89,31 +89,26 @@ arithmetic decoder (~24% of time). Recent optimizations:
 
 ## Investigation Notes
 
-### VP8BitReader Investigation (2026-01-22)
+### VP8BitReader Success (2026-01-22)
 
-Attempted to implement libwebp-style VP8BitReader to replace ArithmeticDecoder
-for coefficient reading. **Result: New implementation was ~10% SLOWER**.
+Initial attempt to replace ArithmeticDecoder was slower. Second attempt using
+libwebp-rs's exact algorithm succeeded with **16% speedup**.
 
-Key findings:
-1. The existing `FastDecoder` in `vp8_arithmetic_decoder.rs` is already well-optimized:
-   - Pre-chunked `[[u8; 4]]` storage enables fast 4-byte loads via `u32::from_be_bytes`
-   - Speculative reading (reads past end with defaults, validates at commit)
-   - State committed only once at the end of each tree read
-   - Lookup table normalization already in place
+Key differences from initial failed attempt:
+1. Used libwebp's VP8GetBitAlt algorithm exactly (not our modified version)
+2. Stored `range - 1` internally (127-254 interval) matching libwebp
+3. Used `leading_zeros()` which compiles to single LZCNT instruction
+4. Simpler split calculation: `split = (range * prob) >> 8`
 
-2. The new VP8BitReader added overhead from:
-   - Contiguous byte storage requiring slice operations for 7-byte loads
-   - `try_into().unwrap()` pattern for array conversion
-   - Reader creation/state save pattern on every coefficient read
+Verified algorithms produce identical bit streams (0 differences across all probabilities).
 
-3. Profile comparison:
-   - Before: `read_with_tree_with_first_node` at 24% (both mode parsing + coefficients)
-   - After: `read_coefficients` at 28.5%, `read_with_tree_with_first_node` at 3.5%
-   - Total arithmetic decoding time INCREASED despite splitting the paths
+Results:
+- Micro-benchmarks: 24-37% faster bit reading
+- Full decoder: 55 → 62 MPix/s (16% speedup)
+- Gap vs libwebp: 2.5x → 2.15x slower
 
-**Conclusion**: Don't replace ArithmeticDecoder. Focus on other bottlenecks:
-- Loop filter (~11%): SIMD normal filter could help significantly
-- YUV conversion (~4%): Already has SIMD, may be near optimal
+The ArithmeticDecoder is still used for header/mode parsing (self.b field).
+Only coefficient reading uses the new VP8Partitions/PartitionReader.
 
 ### Loop Filter Optimization Opportunity
 
