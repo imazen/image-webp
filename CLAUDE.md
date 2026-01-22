@@ -64,6 +64,17 @@ Our decoder is ~2.1-2.2x slower than libwebp (improved from 2.5x). Recent optimi
 | decode_frame_ | 5.20% | Frame processing overhead |
 | Loop filter total | ~12% | Multiple functions |
 
+### Cache/Branch Analysis (2026-01-22)
+Per-decode comparison with libwebp:
+| Metric | Ours | libwebp | Ratio |
+|--------|------|---------|-------|
+| Instructions | 449M | 99M | 4.5x more |
+| Branch misses | 3.81% | 8.15% | Better! |
+| Cache misses | 14.57% | 5.01% | **3x worse rate** |
+| L1 misses | 4.65M | 256K | **18x more** |
+
+**Main bottleneck is cache efficiency, not branch prediction.**
+
 ### SIMD Decoder Optimizations
 - `src/yuv_simd.rs` - SSE4.1 YUV→RGB with fancy upsampling
   - **Integrated** for both Simple and Fancy (bilinear) upsampling modes
