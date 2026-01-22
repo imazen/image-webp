@@ -22,6 +22,65 @@ use crate::yuv;
 use super::vp8_arithmetic_decoder::ArithmeticDecoder;
 use super::{loop_filter, transform};
 
+/// Helper to apply simple horizontal filter to 16 rows with SIMD when available.
+#[inline]
+fn simple_filter_horizontal_16_rows(
+    buf: &mut [u8],
+    y_start: usize,
+    x0: usize,
+    stride: usize,
+    edge_limit: u8,
+) {
+    #[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+    if is_x86_feature_detected!("sse4.1") {
+        for y_base in (0usize..16).step_by(4) {
+            let offsets = [
+                (y_start + y_base) * stride + x0,
+                (y_start + y_base + 1) * stride + x0,
+                (y_start + y_base + 2) * stride + x0,
+                (y_start + y_base + 3) * stride + x0,
+            ];
+            unsafe {
+                crate::loop_filter_simd::simple_filter_horizontal_4x(buf, offsets, edge_limit);
+            }
+        }
+        return;
+    }
+
+    // Scalar fallback
+    for y in 0usize..16 {
+        let y0 = y_start + y;
+        loop_filter::simple_segment_horizontal(edge_limit, &mut buf[y0 * stride + x0 - 4..][..8]);
+    }
+}
+
+/// Helper to apply simple vertical filter to 16 columns with SIMD when available.
+#[inline]
+fn simple_filter_vertical_16_cols(
+    buf: &mut [u8],
+    y0: usize,
+    x_start: usize,
+    stride: usize,
+    edge_limit: u8,
+) {
+    #[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+    if is_x86_feature_detected!("sse4.1") {
+        for x_base in (0usize..16).step_by(4) {
+            let point = y0 * stride + x_start + x_base;
+            unsafe {
+                crate::loop_filter_simd::simple_filter_vertical_4x(buf, point, stride, edge_limit);
+            }
+        }
+        return;
+    }
+
+    // Scalar fallback
+    for x in 0usize..16 {
+        let point = y0 * stride + x_start + x;
+        loop_filter::simple_segment_vertical(edge_limit, buf, point, stride);
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct TreeNode {
     pub left: u8,
@@ -980,15 +1039,13 @@ impl<R: Read> Vp8Decoder<R> {
             if mbx > 0 {
                 //simple loop filtering
                 if self.frame.filter_type {
-                    for y in 0usize..16 {
-                        let y0 = mby * 16 + y;
-                        let x0 = mbx * 16;
-
-                        loop_filter::simple_segment_horizontal(
-                            mbedge_limit,
-                            &mut self.frame.ybuf[y0 * luma_w + x0 - 4..][..8],
-                        );
-                    }
+                    simple_filter_horizontal_16_rows(
+                        &mut self.frame.ybuf[..],
+                        mby * 16,
+                        mbx * 16,
+                        luma_w,
+                        mbedge_limit,
+                    );
                 } else {
                     for y in 0usize..16 {
                         let y0 = mby * 16 + y;
@@ -1026,15 +1083,13 @@ impl<R: Read> Vp8Decoder<R> {
             if do_subblock_filtering {
                 if self.frame.filter_type {
                     for x in (4usize..16 - 1).step_by(4) {
-                        for y in 0..16 {
-                            let y0 = mby * 16 + y;
-                            let x0 = mbx * 16 + x;
-
-                            loop_filter::simple_segment_horizontal(
-                                sub_bedge_limit,
-                                &mut self.frame.ybuf[y0 * luma_w + x0 - 4..][..8],
-                            );
-                        }
+                        simple_filter_horizontal_16_rows(
+                            &mut self.frame.ybuf[..],
+                            mby * 16,
+                            mbx * 16 + x,
+                            luma_w,
+                            sub_bedge_limit,
+                        );
                     }
                 } else {
                     for x in (4usize..16 - 3).step_by(4) {
@@ -1075,17 +1130,13 @@ impl<R: Read> Vp8Decoder<R> {
             //filter across top of macroblock
             if mby > 0 {
                 if self.frame.filter_type {
-                    for x in 0usize..16 {
-                        let y0 = mby * 16;
-                        let x0 = mbx * 16 + x;
-
-                        loop_filter::simple_segment_vertical(
-                            mbedge_limit,
-                            &mut self.frame.ybuf[..],
-                            y0 * luma_w + x0,
-                            luma_w,
-                        );
-                    }
+                    simple_filter_vertical_16_cols(
+                        &mut self.frame.ybuf[..],
+                        mby * 16,
+                        mbx * 16,
+                        luma_w,
+                        mbedge_limit,
+                    );
                 } else {
                     //if bottom macroblock, can only filter if there is 3 pixels below
                     for x in 0usize..16 {
@@ -1130,17 +1181,13 @@ impl<R: Read> Vp8Decoder<R> {
             if do_subblock_filtering {
                 if self.frame.filter_type {
                     for y in (4usize..16 - 1).step_by(4) {
-                        for x in 0..16 {
-                            let y0 = mby * 16 + y;
-                            let x0 = mbx * 16 + x;
-
-                            loop_filter::simple_segment_vertical(
-                                sub_bedge_limit,
-                                &mut self.frame.ybuf[..],
-                                y0 * luma_w + x0,
-                                luma_w,
-                            );
-                        }
+                        simple_filter_vertical_16_cols(
+                            &mut self.frame.ybuf[..],
+                            mby * 16 + y,
+                            mbx * 16,
+                            luma_w,
+                            sub_bedge_limit,
+                        );
                     }
                 } else {
                     for y in (4usize..16 - 3).step_by(4) {
