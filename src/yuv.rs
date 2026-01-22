@@ -413,11 +413,8 @@ pub(crate) fn convert_image_yuv_simd<const BPP: usize>(
     let chroma_size = 8 * mb_width * 8 * mb_height;
 
     // Use yuv crate for fast SIMD conversion
-    let mut yuv_image = YuvPlanarImageMut::<u8>::alloc(
-        width as u32,
-        height as u32,
-        YuvChromaSubsampling::Yuv420,
-    );
+    let mut yuv_image =
+        YuvPlanarImageMut::<u8>::alloc(width as u32, height as u32, YuvChromaSubsampling::Yuv420);
 
     // Convert using appropriate function based on BPP
     let result = if BPP == 4 {
@@ -450,8 +447,8 @@ pub(crate) fn convert_image_yuv_simd<const BPP: usize>(
     let u_src = yuv_image.u_plane.borrow();
     let v_src = yuv_image.v_plane.borrow();
 
-    let src_chroma_width = (width_usize + 1) / 2;
-    let src_chroma_height = (height_usize + 1) / 2;
+    let src_chroma_width = width_usize.div_ceil(2);
+    let src_chroma_height = height_usize.div_ceil(2);
 
     // Allocate output buffers with macroblock alignment
     let mut y_bytes = vec![0u8; y_size];
@@ -474,7 +471,8 @@ pub(crate) fn convert_image_yuv_simd<const BPP: usize>(
 
     // Vertical padding for Y - copy the last row repeatedly
     if height_usize < mb_height * 16 {
-        let last_row: Vec<u8> = y_bytes[(height_usize - 1) * luma_width..height_usize * luma_width].to_vec();
+        let last_row: Vec<u8> =
+            y_bytes[(height_usize - 1) * luma_width..height_usize * luma_width].to_vec();
         for y in height_usize..(mb_height * 16) {
             let dst_row = y * luma_width;
             y_bytes[dst_row..dst_row + luma_width].copy_from_slice(&last_row);
@@ -501,8 +499,12 @@ pub(crate) fn convert_image_yuv_simd<const BPP: usize>(
 
     // Vertical padding for U/V - copy the last row repeatedly
     if src_chroma_height < mb_height * 8 {
-        let last_u_row: Vec<u8> = u_bytes[(src_chroma_height - 1) * chroma_width..src_chroma_height * chroma_width].to_vec();
-        let last_v_row: Vec<u8> = v_bytes[(src_chroma_height - 1) * chroma_width..src_chroma_height * chroma_width].to_vec();
+        let last_u_row: Vec<u8> = u_bytes
+            [(src_chroma_height - 1) * chroma_width..src_chroma_height * chroma_width]
+            .to_vec();
+        let last_v_row: Vec<u8> = v_bytes
+            [(src_chroma_height - 1) * chroma_width..src_chroma_height * chroma_width]
+            .to_vec();
         for y in src_chroma_height..(mb_height * 8) {
             let dst_row = y * chroma_width;
             u_bytes[dst_row..dst_row + chroma_width].copy_from_slice(&last_u_row);
@@ -643,8 +645,8 @@ pub(crate) fn convert_image_yuv<const BPP: usize>(
     }
 
     // Horizontal padding for U/V
-    let chroma_height = (height + 1) / 2;
-    let actual_chroma_width = (width + 1) / 2;
+    let chroma_height = height.div_ceil(2);
+    let actual_chroma_width = width.div_ceil(2);
     for y in 0..chroma_height {
         let last_u = u_bytes[y * chroma_width + actual_chroma_width - 1];
         let last_v = v_bytes[y * chroma_width + actual_chroma_width - 1];

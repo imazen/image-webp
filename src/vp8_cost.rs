@@ -12,6 +12,8 @@
 // Allow unused items - these tables and functions are part of the complete libwebp
 // cost estimation system and will be used as additional features are implemented.
 #![allow(dead_code)]
+// Many loops in this file match libwebp's C patterns for clarity when comparing
+#![allow(clippy::needless_range_loop)]
 
 /// Distortion multiplier - scales distortion to match bit cost units
 pub const RD_DISTO_MULT: u32 = 256;
@@ -963,6 +965,7 @@ impl VP8Matrix {
 
     /// Quantize only AC coefficients (positions 1-15) in place, leaving DC unchanged
     /// This is used for Y1 blocks where the DC goes to the Y2 block
+    #[allow(clippy::needless_range_loop)] // pos indexes both coeffs and self.iq/self.bias
     pub fn quantize_ac_only(&self, coeffs: &mut [i32; 16]) {
         for pos in 1..16 {
             let sign = coeffs[pos] < 0;
@@ -980,6 +983,7 @@ impl VP8Matrix {
     }
 
     /// Dequantize only AC coefficients (positions 1-15) in place
+    #[allow(clippy::needless_range_loop)] // pos indexes both coeffs and self.q
     pub fn dequantize_ac_only(&self, coeffs: &mut [i32; 16]) {
         for pos in 1..16 {
             coeffs[pos] *= self.q[pos] as i32;
@@ -1014,8 +1018,8 @@ struct TrellisNode {
 /// The cost table is determined by the context resulting from this state's level.
 #[derive(Clone, Copy)]
 struct TrellisScoreState<'a> {
-    score: i64,                            // partial RD score
-    costs: Option<&'a LevelCostArray>,     // cost table for next position (based on ctx from this level)
+    score: i64,                        // partial RD score
+    costs: Option<&'a LevelCostArray>, // cost table for next position (based on ctx from this level)
 }
 
 impl Default for TrellisScoreState<'_> {
@@ -1069,6 +1073,8 @@ fn level_cost_with_table(costs: Option<&LevelCostArray>, level: i32) -> u32 {
 ///
 /// # Returns
 /// True if any non-zero coefficient was produced
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::needless_range_loop)] // p indexes multiple arrays with different semantics
 pub fn trellis_quantize_block(
     coeffs: &mut [i32; 16],
     out: &mut [i32; 16],
@@ -1079,7 +1085,6 @@ pub fn trellis_quantize_block(
     ctype: usize,
     ctx0: usize,
 ) -> bool {
-
     // Number of alternate levels to try: level-0 (MIN_DELTA=0) and level+1 (MAX_DELTA=1)
     const NUM_NODES: usize = 2; // [level, level+1]
 
@@ -1121,8 +1126,8 @@ pub fn trellis_quantize_block(
     };
     let init_score = rd_score_trellis(lambda, init_rate, 0);
 
-    for delta in 0..NUM_NODES {
-        score_states[ss_cur_idx][delta] = TrellisScoreState {
+    for state in &mut score_states[ss_cur_idx][..NUM_NODES] {
+        *state = TrellisScoreState {
             score: init_score,
             costs: Some(initial_costs),
         };
@@ -1483,8 +1488,8 @@ impl ProbaStats {
     /// Returns 255 - (nb * 255 / total) where nb = count of 1s.
     pub fn calc_proba(&self, t: usize, b: usize, c: usize, p: usize) -> u8 {
         let stats = self.stats[t][b][c][p];
-        let nb = (stats & 0xffff) as u32; // count of 1s
-        let total = (stats >> 16) as u32; // total count
+        let nb = stats & 0xffff; // count of 1s
+        let total = stats >> 16; // total count
         if total == 0 {
             return 255;
         }
@@ -1762,6 +1767,7 @@ impl LevelCosts {
 
     /// Calculate level costs from probability tables.
     /// Ported from libwebp's VP8CalculateLevelCosts.
+    #[allow(clippy::needless_range_loop)] // indices used for multiple arrays
     pub fn calculate(&mut self, probs: &TokenProbTables) {
         if !self.dirty {
             return;
@@ -1774,11 +1780,7 @@ impl LevelCosts {
 
                     // cost0 is the cost of signaling "no more coefficients" at context > 0
                     // For ctx == 0, this cost is handled separately
-                    let cost0 = if ctx > 0 {
-                        vp8_bit_cost(true, p[0])
-                    } else {
-                        0
-                    };
+                    let cost0 = if ctx > 0 { vp8_bit_cost(true, p[0]) } else { 0 };
 
                     // cost_base is cost of signaling "coefficient present" + cost0
                     let cost_base = vp8_bit_cost(true, p[1]) + cost0;
@@ -1935,7 +1937,7 @@ pub fn get_residual_cost(
     // Process coefficients from first to last-1
     // Context updates: ctx for position n+1 depends on coefficient value at position n
     while (n as i32) < res.last {
-        let v = res.coeffs[n].abs() as usize;
+        let v = res.coeffs[n].unsigned_abs() as usize;
 
         // Add cost using current context
         cost += costs.get_level_cost(ctype, n, ctx, v);
@@ -1948,7 +1950,7 @@ pub fn get_residual_cost(
 
     // Last coefficient is always non-zero
     {
-        let v = res.coeffs[n].abs() as usize;
+        let v = res.coeffs[n].unsigned_abs() as usize;
         debug_assert!(v != 0, "Last coefficient should be non-zero");
 
         // Add cost using current context
@@ -2041,11 +2043,7 @@ pub fn get_cost_luma16(
 ///
 /// # Returns
 /// Total cost in 1/256 bits
-pub fn get_cost_uv(
-    uv_levels: &[[i32; 16]; 8],
-    costs: &LevelCosts,
-    probs: &TokenProbTables,
-) -> u32 {
+pub fn get_cost_uv(uv_levels: &[[i32; 16]; 8], costs: &LevelCosts, probs: &TokenProbTables) -> u32 {
     let mut total_cost = 0u32;
 
     // UV blocks use coeff_type=2 (TYPE_CHROMA_A)
@@ -2139,6 +2137,7 @@ const VP8_DSP_SCAN: [usize; 24] = [
 /// Ported from libwebp's VP8I16ModeOffsets
 const I16DC16: usize = 0;
 const I16TM16: usize = I16DC16 + 16;
+#[allow(clippy::identity_op)] // 1 * 16 matches libwebp's pattern (row * block_size * stride)
 const I16VE16: usize = 1 * 16 * BPS;
 const I16HE16: usize = I16VE16 + 16;
 
@@ -2212,6 +2211,7 @@ impl DctHistogram {
 
 /// Forward DCT on a 4x4 block (difference between source and prediction)
 /// Ported from libwebp's VP8FTransform (FTransform_C)
+#[allow(clippy::identity_op)] // 0 + offset pattern matches libwebp's code structure
 fn forward_dct_4x4(src: &[u8], pred: &[u8], src_stride: usize, pred_stride: usize) -> [i16; 16] {
     let mut tmp = [0i32; 16];
     let mut out = [0i16; 16];
@@ -2269,9 +2269,9 @@ pub fn collect_histogram_bps(
 ) -> DctHistogram {
     let mut distribution = [0u32; MAX_COEFF_THRESH + 1];
 
-    for j in start_block..end_block {
-        let src_off = VP8_DSP_SCAN[j];
-        let pred_off = VP8_DSP_SCAN[j];
+    for &scan_off in &VP8_DSP_SCAN[start_block..end_block] {
+        let src_off = scan_off;
+        let pred_off = scan_off;
 
         let dct_out = forward_dct_4x4(&src[src_off..], &pred[pred_off..], BPS, BPS);
 
@@ -2303,28 +2303,19 @@ fn pred_luma16_dc(dst: &mut [u8], left: Option<&[u8]>, top: Option<&[u8]>) {
     let dc_val = match (top, left) {
         (Some(top), Some(left)) => {
             // Both borders: sum all 32 samples
-            let mut dc: u32 = 0;
-            for i in 0..16 {
-                dc += u32::from(top[i]);
-                dc += u32::from(left[i]);
-            }
+            let dc: u32 = top[..16].iter().map(|&x| u32::from(x)).sum::<u32>()
+                + left[..16].iter().map(|&x| u32::from(x)).sum::<u32>();
             ((dc + 16) >> 5) as u8
         }
         (Some(top), None) => {
             // Top only: sum 16 samples, double, then shift by 5
-            let mut dc: u32 = 0;
-            for i in 0..16 {
-                dc += u32::from(top[i]);
-            }
+            let mut dc: u32 = top[..16].iter().map(|&x| u32::from(x)).sum();
             dc += dc; // Double
             ((dc + 16) >> 5) as u8
         }
         (None, Some(left)) => {
             // Left only: sum 16 samples, double, then shift by 5
-            let mut dc: u32 = 0;
-            for i in 0..16 {
-                dc += u32::from(left[i]);
-            }
+            let mut dc: u32 = left[..16].iter().map(|&x| u32::from(x)).sum();
             dc += dc; // Double
             ((dc + 16) >> 5) as u8
         }
@@ -2613,8 +2604,8 @@ pub struct AnalysisIterator {
 impl AnalysisIterator {
     /// Create a new analysis iterator
     pub fn new(width: usize, height: usize) -> Self {
-        let mb_w = (width + 15) / 16;
-        let mb_h = (height + 15) / 16;
+        let mb_w = width.div_ceil(16);
+        let mb_h = height.div_ceil(16);
 
         Self {
             x: 0,
@@ -2687,8 +2678,8 @@ impl AnalysisIterator {
 
         let w = (self.width - x * 16).min(16);
         let h = (self.height - y * 16).min(16);
-        let uv_w = (w + 1) / 2;
-        let uv_h = (h + 1) / 2;
+        let uv_w = w.div_ceil(2);
+        let uv_h = h.div_ceil(2);
 
         // Import Y
         import_block(
@@ -3184,9 +3175,9 @@ pub fn assign_segments_kmeans(
 ///
 /// # Arguments
 /// * `base_quant` - Base quantizer index (0-127), computed from quality
-/// * `segment_alpha` - Transformed alpha for this segment, in range [-127, 127]
-///                     Computed as: 255 * (center - mid) / (max - min)
-///                     Positive = easier to compress, negative = harder
+/// * `segment_alpha` - Transformed alpha for this segment, in range [-127, 127].
+///   Computed as: 255 * (center - mid) / (max - min).
+///   Positive = easier to compress, negative = harder.
 /// * `sns_strength` - SNS strength (0-100), higher = more segment differentiation
 ///
 /// # Returns
@@ -3528,12 +3519,7 @@ mod tests {
         let matrix = VP8Matrix::new(30, 30, MatrixType::Y1);
 
         // Block with clear signal
-        let block = [
-            300i32, 0, 0, 0,
-            0, 0, 0, 0,
-            0, 0, 0, 0,
-            0, 0, 0, 0,
-        ];
+        let block = [300i32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
         let mut coeffs = block;
         let mut trellis_out = [0i32; 16];
@@ -3587,9 +3573,7 @@ mod tests {
         let matrix = VP8Matrix::new(27, 30, MatrixType::Y1);
 
         // Block with small coefficient at position 4 (-17)
-        let block = [
-            20i32, -8, 0, 0, -17, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        ];
+        let block = [20i32, -8, 0, 0, -17, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
         // Simple quantization
         let mut simple_out = [0i32; 16];
@@ -3723,15 +3707,23 @@ mod tests {
 
         // Show quantization parameters
         eprintln!("\nQuantization parameters:");
-        eprintln!("  DC q={}, iq={}, bias={}", matrix.q[0], matrix.iq[0], matrix.bias[0]);
-        eprintln!("  AC q={}, iq={}, bias={}", matrix.q[1], matrix.iq[1], matrix.bias[1]);
+        eprintln!(
+            "  DC q={}, iq={}, bias={}",
+            matrix.q[0], matrix.iq[0], matrix.bias[0]
+        );
+        eprintln!(
+            "  AC q={}, iq={}, bias={}",
+            matrix.q[1], matrix.iq[1], matrix.bias[1]
+        );
 
         // Show cost table values for position 0, contexts 0,1,2
         eprintln!("\nCost tables for position 0 (levels 0,1,2):");
         for ctx in 0..3 {
             let costs = level_costs.get_cost_table(ctype, 0, ctx);
-            eprintln!("  ctx={}: level0={}, level1={}, level2={}",
-                ctx, costs[0], costs[1], costs[2]);
+            eprintln!(
+                "  ctx={}: level0={}, level1={}, level2={}",
+                ctx, costs[0], costs[1], costs[2]
+            );
         }
 
         // Simple quantization
@@ -3744,8 +3736,10 @@ mod tests {
 
         // Per-coefficient analysis
         eprintln!("\nPer-coefficient analysis:");
-        eprintln!("{:>3} {:>6} {:>6} {:>6} {:>10} {:>10} {:>10}",
-            "pos", "input", "simple", "level0", "cost_l0", "cost_l1", "dist_diff");
+        eprintln!(
+            "{:>3} {:>6} {:>6} {:>6} {:>10} {:>10} {:>10}",
+            "pos", "input", "simple", "level0", "cost_l0", "cost_l1", "dist_diff"
+        );
 
         for n in 0..8 {
             let j = VP8_ZIGZAG[n];
@@ -3756,7 +3750,8 @@ mod tests {
             // Compute level0 (base quantization with neutral bias)
             let sign = coeff < 0;
             let abs_coeff = if sign { -coeff } else { coeff };
-            let level0 = quantdiv(abs_coeff as u32, iq, quantization_bias(0x00)).min(MAX_LEVEL as i32);
+            let level0 =
+                quantdiv(abs_coeff as u32, iq, quantization_bias(0x00)).min(MAX_LEVEL as i32);
 
             // Get cost table (assume ctx=0 for simplicity)
             let costs = level_costs.get_cost_table(ctype, n, 0);
@@ -3774,8 +3769,10 @@ mod tests {
             let err1 = abs_coeff - (level0 + 1) * q;
             let dist_diff = err1 * err1 - err0 * err0;
 
-            eprintln!("{:>3} {:>6} {:>6} {:>6} {:>10} {:>10} {:>10}",
-                n, coeff, simple_out[n], level0, cost_l0, cost_l1, dist_diff);
+            eprintln!(
+                "{:>3} {:>6} {:>6} {:>6} {:>10} {:>10} {:>10}",
+                n, coeff, simple_out[n], level0, cost_l0, cost_l1, dist_diff
+            );
         }
 
         // RD decision analysis
@@ -3822,7 +3819,10 @@ mod tests {
         eprintln!("\nDifferences (simple vs trellis):");
         for n in 0..16 {
             if simple_out[n] != trellis_out[n] {
-                eprintln!("  pos {}: simple={}, trellis={}", n, simple_out[n], trellis_out[n]);
+                eprintln!(
+                    "  pos {}: simple={}, trellis={}",
+                    n, simple_out[n], trellis_out[n]
+                );
             }
         }
     }
@@ -3856,7 +3856,9 @@ mod tests {
 
         // Input coefficients (NOTE: these are already in natural/raster order in libwebp)
         // libwebp's "input" is coefficients[j] where j = kZigzag[n], so already in natural order
-        let input = [-282i32, 6, 3, -4, -3, -11, -4, -2, 5, 3, 4, -1, 2, -2, -3, -1];
+        let input = [
+            -282i32, 6, 3, -4, -3, -11, -4, -2, 5, 3, 4, -1, 2, -2, -3, -1,
+        ];
 
         let lambda = 840u32;
         let ctype = 3usize; // TYPE_I4_AC
@@ -3864,7 +3866,10 @@ mod tests {
         let first = 0usize;
 
         eprintln!("\n=== TRELLIS VS LIBWEBP ===");
-        eprintln!("lambda={}, ctype={} (I4), ctx0={}, first={}", lambda, ctype, ctx0, first);
+        eprintln!(
+            "lambda={}, ctype={} (I4), ctx0={}, first={}",
+            lambda, ctype, ctx0, first
+        );
 
         // Check skip and init costs
         let skip_cost = level_costs.get_skip_eob_cost(ctype, first, ctx0);
