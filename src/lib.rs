@@ -20,6 +20,8 @@ mod encoder;
 mod extended;
 mod huffman;
 mod loop_filter;
+#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+mod loop_filter_simd;
 mod lossless;
 mod lossless_transform;
 #[cfg(feature = "unsafe-simd")]
@@ -36,5 +38,7 @@ mod vp8_cost;
 mod vp8_encoder;
 mod vp8_prediction;
 mod yuv;
+#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+mod yuv_simd;
 
 pub mod vp8;
