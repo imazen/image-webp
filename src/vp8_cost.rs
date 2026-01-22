@@ -370,6 +370,20 @@ pub const VP8_WEIGHT_UV: [u16; 16] = [
 /// * `w` - 16 weights for frequency weighting
 #[inline]
 fn t_transform(input: &[u8], stride: usize, w: &[u16; 16]) -> i32 {
+    #[cfg(feature = "unsafe-simd")]
+    {
+        crate::simd_sse::t_transform(input, stride, w)
+    }
+    #[cfg(not(feature = "unsafe-simd"))]
+    {
+        t_transform_scalar(input, stride, w)
+    }
+}
+
+/// Scalar implementation of t_transform
+#[inline]
+#[cfg(not(feature = "unsafe-simd"))]
+fn t_transform_scalar(input: &[u8], stride: usize, w: &[u16; 16]) -> i32 {
     let mut tmp = [0i32; 16];
 
     // Horizontal pass
