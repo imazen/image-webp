@@ -143,8 +143,8 @@ mod scalar {
             }
         }
 
-        let chroma_height = (height + 1) / 2;
-        let actual_chroma_width = (width + 1) / 2;
+        let chroma_height = height.div_ceil(2);
+        let actual_chroma_width = width.div_ceil(2);
         for y in 0..chroma_height {
             let last_u = u_bytes[y * chroma_width + actual_chroma_width - 1];
             let last_v = v_bytes[y * chroma_width + actual_chroma_width - 1];
@@ -205,8 +205,8 @@ mod simd {
         let u_src = yuv_image.u_plane.borrow();
         let v_src = yuv_image.v_plane.borrow();
 
-        let src_chroma_width = (width_usize + 1) / 2;
-        let src_chroma_height = (height_usize + 1) / 2;
+        let src_chroma_width = width_usize.div_ceil(2);
+        let src_chroma_height = height_usize.div_ceil(2);
 
         let mut y_bytes = vec![0u8; y_size];
         let mut u_bytes = vec![0u8; chroma_size];

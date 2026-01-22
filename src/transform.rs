@@ -204,11 +204,11 @@ mod tests {
             38, 6, 210, 107, 42, 125, 185, 151, 241, 224, 125, 233, 227, 8, 57, 96,
         ];
 
-        let mut dct_block = BLOCK.clone();
+        let mut dct_block = BLOCK;
 
         dct4x4(&mut dct_block);
 
-        let mut inverse_dct_block = dct_block.clone();
+        let mut inverse_dct_block = dct_block;
 
         idct4x4(&mut inverse_dct_block);
 

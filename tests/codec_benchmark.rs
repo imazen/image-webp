@@ -129,6 +129,7 @@ struct EncodeResult {
 }
 
 /// Benchmark results for one image
+#[allow(dead_code)]
 #[derive(Debug)]
 struct ImageResults {
     name: String,

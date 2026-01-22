@@ -107,6 +107,7 @@ fn decode_webp(data: &[u8]) -> Option<Vec<u8>> {
     Some(image.to_vec())
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 struct BenchResult {
     quality: u8,
