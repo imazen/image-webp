@@ -20,6 +20,7 @@ use crate::vp8_prediction::*;
 use crate::yuv;
 
 use super::vp8_arithmetic_decoder::ArithmeticDecoder;
+use super::vp8_bit_reader::VP8Partitions;
 use super::{loop_filter, transform};
 
 /// Helper to apply simple horizontal filter to 16 rows with SIMD when available.
@@ -321,7 +322,7 @@ pub struct Vp8Decoder<R> {
     ref_delta: [i32; 4],
     mode_delta: [i32; 4],
 
-    partitions: [ArithmeticDecoder; 8],
+    partitions: VP8Partitions,
     num_partitions: u8,
 
     segment_tree_nodes: [TreeNode; 3],
@@ -369,16 +370,7 @@ impl<R: Read> Vp8Decoder<R> {
             ref_delta: [0; 4],
             mode_delta: [0; 4],
 
-            partitions: [
-                ArithmeticDecoder::new(),
-                ArithmeticDecoder::new(),
-                ArithmeticDecoder::new(),
-                ArithmeticDecoder::new(),
-                ArithmeticDecoder::new(),
-                ArithmeticDecoder::new(),
-                ArithmeticDecoder::new(),
-                ArithmeticDecoder::new(),
-            ],
+            partitions: VP8Partitions::new(),
 
             num_partitions: 1,
 
@@ -420,29 +412,33 @@ impl<R: Read> Vp8Decoder<R> {
     }
 
     fn init_partitions(&mut self, n: usize) -> Result<(), DecodingError> {
+        let mut all_data = Vec::new();
+        let mut boundaries = Vec::with_capacity(n);
+
         if n > 1 {
             let mut sizes = vec![0; 3 * n - 3];
             self.r.read_exact(sizes.as_mut_slice())?;
 
-            for (i, s) in sizes.chunks(3).enumerate() {
+            for s in sizes.chunks(3) {
                 let size = { s }
                     .read_u24::<LittleEndian>()
-                    .expect("Reading from &[u8] can't fail and the chunk is complete");
+                    .expect("Reading from &[u8] can't fail and the chunk is complete")
+                    as usize;
 
-                let size = size as usize;
-                let mut buf = vec![[0; 4]; size.div_ceil(4)];
-                let bytes: &mut [u8] = buf.as_mut_slice().as_flattened_mut();
-                self.r.read_exact(&mut bytes[..size])?;
-                self.partitions[i].init(buf, size)?;
+                let start = all_data.len();
+                all_data.resize(start + size, 0);
+                self.r.read_exact(&mut all_data[start..start + size])?;
+                boundaries.push((start, size));
             }
         }
 
-        let mut buf = Vec::new();
-        self.r.read_to_end(&mut buf)?;
-        let size = buf.len();
-        let mut chunks = vec![[0; 4]; size.div_ceil(4)];
-        chunks.as_mut_slice().as_flattened_mut()[..size].copy_from_slice(&buf);
-        self.partitions[n - 1].init(chunks, size)?;
+        // Last partition - read to end
+        let start = all_data.len();
+        self.r.read_to_end(&mut all_data)?;
+        let size = all_data.len() - start;
+        boundaries.push((start, size));
+
+        self.partitions.init(all_data, &boundaries);
 
         Ok(())
     }
@@ -853,9 +849,7 @@ impl<R: Read> Vp8Decoder<R> {
             0usize
         };
         let probs = &self.token_probs[plane as usize];
-        let decoder = &mut self.partitions[p];
-
-        let mut res = decoder.start_accumulated_result();
+        let mut reader = self.partitions.reader(p);
 
         let mut complexity = complexity;
         let mut has_coefficients = false;
@@ -865,9 +859,7 @@ impl<R: Read> Vp8Decoder<R> {
             let band = COEFF_BANDS[i] as usize;
             let tree = &probs[band][complexity];
 
-            let token = decoder
-                .read_with_tree_with_first_node(tree, tree[skip as usize])
-                .or_accumulate(&mut res);
+            let token = reader.read_tree(tree, tree[skip as usize]);
 
             let mut abs_value = i32::from(match token {
                 DCT_EOB => break,
@@ -882,15 +874,15 @@ impl<R: Read> Vp8Decoder<R> {
                 literal @ DCT_1..=DCT_4 => i16::from(literal),
 
                 category @ DCT_CAT1..=DCT_CAT6 => {
-                    let probs = PROB_DCT_CAT[(category - DCT_CAT1) as usize];
+                    let cat_probs = PROB_DCT_CAT[(category - DCT_CAT1) as usize];
 
                     let mut extra = 0i16;
 
-                    for t in probs.iter().copied() {
+                    for t in cat_probs.iter().copied() {
                         if t == 0 {
                             break;
                         }
-                        let b = decoder.read_bool(t).or_accumulate(&mut res);
+                        let b = reader.get_bit(t) != 0;
                         extra = extra + extra + i16::from(b);
                     }
 
@@ -910,7 +902,8 @@ impl<R: Read> Vp8Decoder<R> {
                 2
             };
 
-            if decoder.read_sign().or_accumulate(&mut res) {
+            // Read sign bit - if negative, negate the value
+            if reader.get_signed(abs_value) < 0 {
                 abs_value = -abs_value;
             }
 
@@ -920,7 +913,11 @@ impl<R: Read> Vp8Decoder<R> {
             has_coefficients = true;
         }
 
-        decoder.check(res, has_coefficients)
+        // Check for errors after reading
+        if reader.is_eof() {
+            return Err(DecodingError::BitStreamError);
+        }
+        Ok(has_coefficients)
     }
 
     fn read_residual_data(

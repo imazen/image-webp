@@ -35,6 +35,7 @@ mod transform_simd;
 mod transform_simd_intrinsics;
 mod vp8_arithmetic_decoder;
 mod vp8_arithmetic_encoder;
+mod vp8_bit_reader;
 mod vp8_common;
 mod vp8_cost;
 mod vp8_encoder;
