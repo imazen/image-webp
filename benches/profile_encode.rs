@@ -27,9 +27,10 @@ fn load_png(path: &Path) -> (Vec<u8>, u32, u32) {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    let image_path = args.get(1).map(|s| s.as_str()).unwrap_or(
-        concat!(env!("HOME"), "/work/codec-corpus/kodak/1.png")
-    );
+    let image_path = args
+        .get(1)
+        .map(|s| s.as_str())
+        .unwrap_or(concat!(env!("HOME"), "/work/codec-corpus/kodak/1.png"));
     let quality: u8 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(75);
     let iterations: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(10);
 
@@ -44,7 +45,9 @@ fn main() {
     {
         let mut encoder = WebPEncoder::new(&mut output);
         encoder.set_params(EncoderParams::lossy(quality));
-        encoder.encode(&rgb_data, width, height, ColorType::Rgb8).unwrap();
+        encoder
+            .encode(&rgb_data, width, height, ColorType::Rgb8)
+            .unwrap();
     }
     println!("Output size: {} bytes", output.len());
 
@@ -54,15 +57,22 @@ fn main() {
         output.clear();
         let mut encoder = WebPEncoder::new(&mut output);
         encoder.set_params(EncoderParams::lossy(quality));
-        encoder.encode(&rgb_data, width, height, ColorType::Rgb8).unwrap();
+        encoder
+            .encode(&rgb_data, width, height, ColorType::Rgb8)
+            .unwrap();
     }
     let elapsed = start.elapsed();
 
     let ms_per_iter = elapsed.as_secs_f64() * 1000.0 / iterations as f64;
-    let mpix_per_sec = (width as f64 * height as f64 * iterations as f64) / elapsed.as_secs_f64() / 1_000_000.0;
+    let mpix_per_sec =
+        (width as f64 * height as f64 * iterations as f64) / elapsed.as_secs_f64() / 1_000_000.0;
 
     println!("\n=== Results ===");
-    println!("Total time: {:.2}ms for {} iterations", elapsed.as_secs_f64() * 1000.0, iterations);
+    println!(
+        "Total time: {:.2}ms for {} iterations",
+        elapsed.as_secs_f64() * 1000.0,
+        iterations
+    );
     println!("Per iteration: {:.2}ms", ms_per_iter);
     println!("Throughput: {:.2} MPix/s", mpix_per_sec);
 }

@@ -29,12 +29,24 @@ fn ssim2(original: &[u8], decoded: &[u8], width: u32, height: u32) -> f64 {
     // Convert to linear RGB f32 format
     let orig_rgb: Vec<[f32; 3]> = original
         .chunks_exact(3)
-        .map(|p| [srgb_to_linear(p[0]), srgb_to_linear(p[1]), srgb_to_linear(p[2])])
+        .map(|p| {
+            [
+                srgb_to_linear(p[0]),
+                srgb_to_linear(p[1]),
+                srgb_to_linear(p[2]),
+            ]
+        })
         .collect();
 
     let dec_rgb: Vec<[f32; 3]> = decoded
         .chunks_exact(3)
-        .map(|p| [srgb_to_linear(p[0]), srgb_to_linear(p[1]), srgb_to_linear(p[2])])
+        .map(|p| {
+            [
+                srgb_to_linear(p[0]),
+                srgb_to_linear(p[1]),
+                srgb_to_linear(p[2]),
+            ]
+        })
         .collect();
 
     let orig_img = Rgb::new(

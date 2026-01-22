@@ -41,7 +41,11 @@ mod scalar {
         ((v1 + v2 + v3 + v4 + (YUV_HALF << 2)) >> (YUV_FIX + 2)) as u8
     }
 
-    pub fn convert_image_yuv_scalar(image_data: &[u8], width: u16, height: u16) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    pub fn convert_image_yuv_scalar(
+        image_data: &[u8],
+        width: u16,
+        height: u16,
+    ) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
         const BPP: usize = 3;
         let width = usize::from(width);
         let height = usize::from(height);
@@ -80,8 +84,10 @@ mod scalar {
                 y_bytes[src_row2 * luma_width + src_col1] = rgb_to_y(rgb3);
                 y_bytes[src_row2 * luma_width + src_col2] = rgb_to_y(rgb4);
 
-                u_bytes[chroma_row * chroma_width + chroma_col] = rgb_to_u_avg(rgb1, rgb2, rgb3, rgb4);
-                v_bytes[chroma_row * chroma_width + chroma_col] = rgb_to_v_avg(rgb1, rgb2, rgb3, rgb4);
+                u_bytes[chroma_row * chroma_width + chroma_col] =
+                    rgb_to_u_avg(rgb1, rgb2, rgb3, rgb4);
+                v_bytes[chroma_row * chroma_width + chroma_col] =
+                    rgb_to_v_avg(rgb1, rgb2, rgb3, rgb4);
             }
 
             if odd_width {
@@ -91,8 +97,10 @@ mod scalar {
                 let rgb3 = &image_data[(src_row2 * width + src_col) * BPP..][..BPP];
                 y_bytes[src_row1 * luma_width + src_col] = rgb_to_y(rgb1);
                 y_bytes[src_row2 * luma_width + src_col] = rgb_to_y(rgb3);
-                u_bytes[chroma_row * chroma_width + chroma_col] = rgb_to_u_avg(rgb1, rgb1, rgb3, rgb3);
-                v_bytes[chroma_row * chroma_width + chroma_col] = rgb_to_v_avg(rgb1, rgb1, rgb3, rgb3);
+                u_bytes[chroma_row * chroma_width + chroma_col] =
+                    rgb_to_u_avg(rgb1, rgb1, rgb3, rgb3);
+                v_bytes[chroma_row * chroma_width + chroma_col] =
+                    rgb_to_v_avg(rgb1, rgb1, rgb3, rgb3);
             }
         }
 
@@ -107,8 +115,10 @@ mod scalar {
                 let rgb2 = &image_data[(src_row * width + src_col2) * BPP..][..BPP];
                 y_bytes[src_row * luma_width + src_col1] = rgb_to_y(rgb1);
                 y_bytes[src_row * luma_width + src_col2] = rgb_to_y(rgb2);
-                u_bytes[chroma_row * chroma_width + chroma_col] = rgb_to_u_avg(rgb1, rgb2, rgb1, rgb2);
-                v_bytes[chroma_row * chroma_width + chroma_col] = rgb_to_v_avg(rgb1, rgb2, rgb1, rgb2);
+                u_bytes[chroma_row * chroma_width + chroma_col] =
+                    rgb_to_u_avg(rgb1, rgb2, rgb1, rgb2);
+                v_bytes[chroma_row * chroma_width + chroma_col] =
+                    rgb_to_v_avg(rgb1, rgb2, rgb1, rgb2);
             }
             if odd_width {
                 let src_col = width - 1;
@@ -157,11 +167,15 @@ mod scalar {
 // SIMD implementation using yuv crate
 mod simd {
     use yuv::{
-        rgb_to_yuv420, YuvChromaSubsampling, YuvConversionMode, YuvPlanarImageMut,
-        YuvRange, YuvStandardMatrix,
+        rgb_to_yuv420, YuvChromaSubsampling, YuvConversionMode, YuvPlanarImageMut, YuvRange,
+        YuvStandardMatrix,
     };
 
-    pub fn convert_image_yuv_simd(image_data: &[u8], width: u16, height: u16) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    pub fn convert_image_yuv_simd(
+        image_data: &[u8],
+        width: u16,
+        height: u16,
+    ) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
         let width_usize = usize::from(width);
         let height_usize = usize::from(height);
         let mb_width = width_usize.div_ceil(16);
@@ -184,7 +198,8 @@ mod simd {
             YuvRange::Limited,
             YuvStandardMatrix::Bt601,
             YuvConversionMode::Balanced,
-        ).expect("yuv conversion failed");
+        )
+        .expect("yuv conversion failed");
 
         let y_src = yuv_image.y_plane.borrow();
         let u_src = yuv_image.u_plane.borrow();
@@ -209,7 +224,8 @@ mod simd {
             }
         }
         if height_usize < mb_height * 16 {
-            let last_row: Vec<u8> = y_bytes[(height_usize - 1) * luma_width..height_usize * luma_width].to_vec();
+            let last_row: Vec<u8> =
+                y_bytes[(height_usize - 1) * luma_width..height_usize * luma_width].to_vec();
             for y in height_usize..(mb_height * 16) {
                 let dst_row = y * luma_width;
                 y_bytes[dst_row..dst_row + luma_width].copy_from_slice(&last_row);
@@ -232,8 +248,12 @@ mod simd {
             }
         }
         if src_chroma_height < mb_height * 8 {
-            let last_u_row: Vec<u8> = u_bytes[(src_chroma_height - 1) * chroma_width..src_chroma_height * chroma_width].to_vec();
-            let last_v_row: Vec<u8> = v_bytes[(src_chroma_height - 1) * chroma_width..src_chroma_height * chroma_width].to_vec();
+            let last_u_row: Vec<u8> = u_bytes
+                [(src_chroma_height - 1) * chroma_width..src_chroma_height * chroma_width]
+                .to_vec();
+            let last_v_row: Vec<u8> = v_bytes
+                [(src_chroma_height - 1) * chroma_width..src_chroma_height * chroma_width]
+                .to_vec();
             for y in src_chroma_height..(mb_height * 8) {
                 let dst_row = y * chroma_width;
                 u_bytes[dst_row..dst_row + chroma_width].copy_from_slice(&last_u_row);
@@ -250,7 +270,7 @@ fn generate_test_image(width: usize, height: usize) -> Vec<u8> {
     for y in 0..height {
         for x in 0..width {
             let idx = (y * width + x) * 3;
-            data[idx] = ((x * 7 + y * 13) % 256) as u8;     // R
+            data[idx] = ((x * 7 + y * 13) % 256) as u8; // R
             data[idx + 1] = ((x * 11 + y * 5) % 256) as u8; // G
             data[idx + 2] = ((x * 3 + y * 17) % 256) as u8; // B
         }
@@ -301,12 +321,16 @@ fn benchmark_yuv_conversion() {
         let speedup = scalar_elapsed.as_secs_f64() / simd_elapsed.as_secs_f64();
 
         println!("{} ({}x{}):", name, width, height);
-        println!("  Scalar: {:>8.2} ms ({:.1} Mpix/s)",
-                 scalar_elapsed.as_secs_f64() * 1000.0 / iterations as f64,
-                 scalar_mpps);
-        println!("  SIMD:   {:>8.2} ms ({:.1} Mpix/s)",
-                 simd_elapsed.as_secs_f64() * 1000.0 / iterations as f64,
-                 simd_mpps);
+        println!(
+            "  Scalar: {:>8.2} ms ({:.1} Mpix/s)",
+            scalar_elapsed.as_secs_f64() * 1000.0 / iterations as f64,
+            scalar_mpps
+        );
+        println!(
+            "  SIMD:   {:>8.2} ms ({:.1} Mpix/s)",
+            simd_elapsed.as_secs_f64() * 1000.0 / iterations as f64,
+            simd_mpps
+        );
         println!("  Speedup: {:.1}x", speedup);
         println!();
     }
@@ -324,15 +348,24 @@ fn verify_yuv_output_similarity() {
     let (y_simd, u_simd, v_simd) = simd::convert_image_yuv_simd(&image, width, height);
 
     // Calculate max differences
-    let y_max_diff = y_scalar.iter().zip(y_simd.iter())
+    let y_max_diff = y_scalar
+        .iter()
+        .zip(y_simd.iter())
         .map(|(&a, &b)| (a as i32 - b as i32).abs())
-        .max().unwrap_or(0);
-    let u_max_diff = u_scalar.iter().zip(u_simd.iter())
+        .max()
+        .unwrap_or(0);
+    let u_max_diff = u_scalar
+        .iter()
+        .zip(u_simd.iter())
         .map(|(&a, &b)| (a as i32 - b as i32).abs())
-        .max().unwrap_or(0);
-    let v_max_diff = v_scalar.iter().zip(v_simd.iter())
+        .max()
+        .unwrap_or(0);
+    let v_max_diff = v_scalar
+        .iter()
+        .zip(v_simd.iter())
         .map(|(&a, &b)| (a as i32 - b as i32).abs())
-        .max().unwrap_or(0);
+        .max()
+        .unwrap_or(0);
 
     println!("\n=== YUV Output Comparison ===");
     println!("Max Y difference: {}", y_max_diff);

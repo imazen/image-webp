@@ -11,7 +11,7 @@ fn debug_encode_kodak1() {
     let mut reader = decoder.read_info().unwrap();
     let mut buf = vec![0; reader.output_buffer_size()];
     let info = reader.next_frame(&mut buf).unwrap();
-    
+
     let rgb_data = match info.color_type {
         png::ColorType::Rgb => buf[..info.buffer_size()].to_vec(),
         png::ColorType::Rgba => {
@@ -23,27 +23,39 @@ fn debug_encode_kodak1() {
         }
         _ => panic!("Unsupported color type"),
     };
-    
+
     println!("\n=== Comparing encode sizes ===");
-    println!("Image: {}x{} = {} pixels", info.width, info.height, info.width * info.height);
-    
+    println!(
+        "Image: {}x{} = {} pixels",
+        info.width,
+        info.height,
+        info.width * info.height
+    );
+
     for q in [50u8, 75, 90, 95] {
         // Ours
         let mut our_output = Vec::new();
         {
             let mut encoder = WebPEncoder::new(&mut our_output);
             encoder.set_params(EncoderParams::lossy(q));
-            encoder.encode(&rgb_data, info.width, info.height, ColorType::Rgb8).unwrap();
+            encoder
+                .encode(&rgb_data, info.width, info.height, ColorType::Rgb8)
+                .unwrap();
         }
-        
+
         // libwebp
         let lib_encoder = webp::Encoder::from_rgb(&rgb_data, info.width, info.height);
         let lib_output = lib_encoder.encode(q as f32).to_vec();
-        
+
         let ratio = 100.0 * our_output.len() as f64 / lib_output.len() as f64;
-        println!("Q{}: ours={} bytes, libwebp={} bytes, ratio={:.1}%", 
-                 q, our_output.len(), lib_output.len(), ratio);
-                 
+        println!(
+            "Q{}: ours={} bytes, libwebp={} bytes, ratio={:.1}%",
+            q,
+            our_output.len(),
+            lib_output.len(),
+            ratio
+        );
+
         // Save both for inspection
         std::fs::write(format!("/tmp/ours_q{}.webp", q), &our_output).unwrap();
         std::fs::write(format!("/tmp/libwebp_q{}.webp", q), &lib_output).unwrap();

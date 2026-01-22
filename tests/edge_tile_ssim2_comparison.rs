@@ -41,7 +41,13 @@ fn load_png(path: &Path) -> Option<(Vec<u8>, u32, u32)> {
 }
 
 /// Crop image to specified dimensions (top-left origin)
-fn crop_image(rgb: &[u8], src_width: u32, _src_height: u32, new_width: u32, new_height: u32) -> Vec<u8> {
+fn crop_image(
+    rgb: &[u8],
+    src_width: u32,
+    _src_height: u32,
+    new_width: u32,
+    new_height: u32,
+) -> Vec<u8> {
     let new_width = new_width as usize;
     let new_height = new_height as usize;
     let src_width = src_width as usize;
@@ -111,7 +117,10 @@ fn encode_libwebp(rgb: &[u8], width: u32, height: u32, quality: f32) -> Vec<u8> 
 
 /// Decode WebP
 fn decode_webp(data: &[u8]) -> Vec<u8> {
-    webp::Decoder::new(data).decode().expect("Decode failed").to_vec()
+    webp::Decoder::new(data)
+        .decode()
+        .expect("Decode failed")
+        .to_vec()
 }
 
 /// sRGB to linear conversion
@@ -128,11 +137,23 @@ fn srgb_to_linear(v: u8) -> f32 {
 fn calculate_ssim2(rgb1: &[u8], rgb2: &[u8], width: usize, height: usize) -> f64 {
     let src: Vec<[f32; 3]> = rgb1
         .chunks(3)
-        .map(|c| [srgb_to_linear(c[0]), srgb_to_linear(c[1]), srgb_to_linear(c[2])])
+        .map(|c| {
+            [
+                srgb_to_linear(c[0]),
+                srgb_to_linear(c[1]),
+                srgb_to_linear(c[2]),
+            ]
+        })
         .collect();
     let dst: Vec<[f32; 3]> = rgb2
         .chunks(3)
-        .map(|c| [srgb_to_linear(c[0]), srgb_to_linear(c[1]), srgb_to_linear(c[2])])
+        .map(|c| {
+            [
+                srgb_to_linear(c[0]),
+                srgb_to_linear(c[1]),
+                srgb_to_linear(c[2]),
+            ]
+        })
         .collect();
 
     let src_img = Rgb::new(
@@ -183,15 +204,15 @@ fn test_edge_tile_ssim2_comparison() {
     // WebP uses 16x16 macroblocks, so test 1-15 pixel partial edges
     let test_configs = [
         // Width edge tests (partial pixels beyond 16-alignment)
-        (257, 256, 1, 0),   // 1 pixel partial width (256+1)
-        (260, 256, 4, 0),   // 4 pixels partial width (256+4)
-        (264, 256, 8, 0),   // 8 pixels partial width (256+8)
-        (270, 256, 14, 0),  // 14 pixels partial width (256+14)
+        (257, 256, 1, 0),  // 1 pixel partial width (256+1)
+        (260, 256, 4, 0),  // 4 pixels partial width (256+4)
+        (264, 256, 8, 0),  // 8 pixels partial width (256+8)
+        (270, 256, 14, 0), // 14 pixels partial width (256+14)
         // Height edge tests
-        (256, 257, 0, 1),   // 1 pixel partial height
-        (256, 260, 0, 4),   // 4 pixels partial height
-        (256, 264, 0, 8),   // 8 pixels partial height
-        (256, 270, 0, 14),  // 14 pixels partial height
+        (256, 257, 0, 1),  // 1 pixel partial height
+        (256, 260, 0, 4),  // 4 pixels partial height
+        (256, 264, 0, 8),  // 8 pixels partial height
+        (256, 270, 0, 14), // 14 pixels partial height
         // Combined tests
         (257, 257, 1, 1),   // Both edges minimal
         (264, 264, 8, 8),   // Both edges half
@@ -255,7 +276,8 @@ fn test_edge_tile_ssim2_comparison() {
                 } else if edge_h > 0 && edge_w == 0 {
                     // Height edge: tile bottom rows
                     let orig_tiled = tile_bottom_edge(&cropped, width, height, edge_h as usize);
-                    let ours_tiled = tile_bottom_edge(&ours_decoded, width, height, edge_h as usize);
+                    let ours_tiled =
+                        tile_bottom_edge(&ours_decoded, width, height, edge_h as usize);
                     let lib_tiled = tile_bottom_edge(&lib_decoded, width, height, edge_h as usize);
 
                     (
@@ -289,8 +311,16 @@ fn test_edge_tile_ssim2_comparison() {
                     "{:>15} {:>10} {:>6} {:>6} {:>10.2} {:>10.2} {:>10}",
                     image_name,
                     format!("{}x{}", crop_w, crop_h),
-                    if edge_w > 0 { edge_w.to_string() } else { "-".to_string() },
-                    if edge_h > 0 { edge_h.to_string() } else { "-".to_string() },
+                    if edge_w > 0 {
+                        edge_w.to_string()
+                    } else {
+                        "-".to_string()
+                    },
+                    if edge_h > 0 {
+                        edge_h.to_string()
+                    } else {
+                        "-".to_string()
+                    },
                     ours_ssim2,
                     lib_ssim2,
                     diff_str
@@ -309,7 +339,13 @@ fn test_edge_tile_ssim2_comparison() {
             let avg_diff = avg_ours - avg_lib;
             println!(
                 "{:>15} {:>10} {:>6} {:>6} {:>10.2} {:>10.2} {:>10}",
-                "AVERAGE", "", "", "", avg_ours, avg_lib, format!("{:+.2}", avg_diff)
+                "AVERAGE",
+                "",
+                "",
+                "",
+                avg_ours,
+                avg_lib,
+                format!("{:+.2}", avg_diff)
             );
         }
     }
@@ -335,13 +371,13 @@ fn test_edge_full_image_comparison() {
 
     // Test various non-aligned sizes
     let sizes = [
-        (256, 256),  // Aligned
-        (257, 256),  // +1 width
-        (256, 257),  // +1 height
-        (257, 257),  // +1 both
-        (264, 264),  // +8 both
-        (270, 270),  // +14 both
-        (271, 271),  // +15 both
+        (256, 256), // Aligned
+        (257, 256), // +1 width
+        (256, 257), // +1 height
+        (257, 257), // +1 both
+        (264, 264), // +8 both
+        (270, 270), // +14 both
+        (271, 271), // +15 both
     ];
 
     let quality = 75u8;

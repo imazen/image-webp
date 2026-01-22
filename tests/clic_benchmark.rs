@@ -60,12 +60,24 @@ fn compute_ssim2(original: &[u8], decoded: &[u8], width: u32, height: u32) -> f6
     // Convert u8 RGB to Vec<[f32; 3]>
     let orig_f32: Vec<[f32; 3]> = original
         .chunks_exact(3)
-        .map(|p| [p[0] as f32 / 255.0, p[1] as f32 / 255.0, p[2] as f32 / 255.0])
+        .map(|p| {
+            [
+                p[0] as f32 / 255.0,
+                p[1] as f32 / 255.0,
+                p[2] as f32 / 255.0,
+            ]
+        })
         .collect();
 
     let dec_f32: Vec<[f32; 3]> = decoded
         .chunks_exact(3)
-        .map(|p| [p[0] as f32 / 255.0, p[1] as f32 / 255.0, p[2] as f32 / 255.0])
+        .map(|p| {
+            [
+                p[0] as f32 / 255.0,
+                p[1] as f32 / 255.0,
+                p[2] as f32 / 255.0,
+            ]
+        })
         .collect();
 
     let orig_img = Rgb::new(
@@ -74,7 +86,8 @@ fn compute_ssim2(original: &[u8], decoded: &[u8], width: u32, height: u32) -> f6
         height as usize,
         TransferCharacteristic::SRGB,
         ColorPrimaries::BT709,
-    ).unwrap();
+    )
+    .unwrap();
 
     let dec_img = Rgb::new(
         dec_f32,
@@ -82,7 +95,8 @@ fn compute_ssim2(original: &[u8], decoded: &[u8], width: u32, height: u32) -> f6
         height as usize,
         TransferCharacteristic::SRGB,
         ColorPrimaries::BT709,
-    ).unwrap();
+    )
+    .unwrap();
 
     compute_frame_ssimulacra2(orig_img, dec_img).unwrap()
 }
@@ -153,7 +167,12 @@ fn clic_benchmark() {
     let mut images: Vec<_> = fs::read_dir(clic_path)
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map(|ext| ext == "png").unwrap_or(false))
+        .filter(|e| {
+            e.path()
+                .extension()
+                .map(|ext| ext == "png")
+                .unwrap_or(false)
+        })
         .collect();
     images.sort_by_key(|e| e.path());
 
@@ -198,10 +217,12 @@ fn clic_benchmark() {
             total_ours_ssim2[qi] += result.ours_ssim2;
             total_libwebp_ssim2[qi] += result.libwebp_ssim2;
 
-            print!("q{}[{:+.1}dB,{:+.0}%] ",
-                   quality,
-                   result.ours_ssim2 - result.libwebp_ssim2,
-                   (result.ours_size as f64 / result.libwebp_size as f64 - 1.0) * 100.0);
+            print!(
+                "q{}[{:+.1}dB,{:+.0}%] ",
+                quality,
+                result.ours_ssim2 - result.libwebp_ssim2,
+                (result.ours_size as f64 / result.libwebp_size as f64 - 1.0) * 100.0
+            );
         }
         println!();
 
@@ -212,8 +233,10 @@ fn clic_benchmark() {
 
     println!("\n=== Summary ({} images) ===\n", image_count);
 
-    println!("{:>8} {:>12} {:>12} {:>10} {:>10} {:>10} {:>10}",
-             "Quality", "Ours Size", "Lib Size", "Size Δ%", "Ours SSIM2", "Lib SSIM2", "SSIM2 Δ");
+    println!(
+        "{:>8} {:>12} {:>12} {:>10} {:>10} {:>10} {:>10}",
+        "Quality", "Ours Size", "Lib Size", "Size Δ%", "Ours SSIM2", "Lib SSIM2", "SSIM2 Δ"
+    );
     println!("{}", "-".repeat(82));
 
     for (qi, &quality) in qualities.iter().enumerate() {
@@ -222,27 +245,33 @@ fn clic_benchmark() {
         let avg_libwebp_ssim2 = total_libwebp_ssim2[qi] / n;
         let size_ratio = total_ours_size[qi] as f64 / total_libwebp_size[qi] as f64;
 
-        println!("{:>8} {:>12} {:>12} {:>+9.1}% {:>10.2} {:>10.2} {:>+10.2}",
-                 quality,
-                 format_size(total_ours_size[qi]),
-                 format_size(total_libwebp_size[qi]),
-                 (size_ratio - 1.0) * 100.0,
-                 avg_ours_ssim2,
-                 avg_libwebp_ssim2,
-                 avg_ours_ssim2 - avg_libwebp_ssim2);
+        println!(
+            "{:>8} {:>12} {:>12} {:>+9.1}% {:>10.2} {:>10.2} {:>+10.2}",
+            quality,
+            format_size(total_ours_size[qi]),
+            format_size(total_libwebp_size[qi]),
+            (size_ratio - 1.0) * 100.0,
+            avg_ours_ssim2,
+            avg_libwebp_ssim2,
+            avg_ours_ssim2 - avg_libwebp_ssim2
+        );
     }
 
-    println!("\n{:>8} {:>12} {:>12} {:>10}",
-             "Quality", "Ours Time", "Lib Time", "Speedup");
+    println!(
+        "\n{:>8} {:>12} {:>12} {:>10}",
+        "Quality", "Ours Time", "Lib Time", "Speedup"
+    );
     println!("{}", "-".repeat(52));
 
     for (qi, &quality) in qualities.iter().enumerate() {
         let speedup = total_libwebp_time[qi] / total_ours_time[qi];
-        println!("{:>8} {:>11.1}s {:>11.1}s {:>9.2}x",
-                 quality,
-                 total_ours_time[qi] / 1000.0,
-                 total_libwebp_time[qi] / 1000.0,
-                 speedup);
+        println!(
+            "{:>8} {:>11.1}s {:>11.1}s {:>9.2}x",
+            quality,
+            total_ours_time[qi] / 1000.0,
+            total_libwebp_time[qi] / 1000.0,
+            speedup
+        );
     }
 }
 
@@ -269,7 +298,12 @@ fn clic_detailed_quality_sweep() {
     let mut images: Vec<_> = fs::read_dir(clic_path)
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map(|ext| ext == "png").unwrap_or(false))
+        .filter(|e| {
+            e.path()
+                .extension()
+                .map(|ext| ext == "png")
+                .unwrap_or(false)
+        })
         .take(5)
         .collect();
     images.sort_by_key(|e| e.path());
@@ -277,8 +311,10 @@ fn clic_detailed_quality_sweep() {
     let qualities: Vec<u8> = (10..=100).step_by(10).collect();
 
     println!("\n=== Detailed Quality Sweep (5 images) ===\n");
-    println!("{:>8} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
-             "Quality", "Ours KB", "Lib KB", "Size Δ%", "Ours SSIM2", "Lib SSIM2", "SSIM2 Δ");
+    println!(
+        "{:>8} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
+        "Quality", "Ours KB", "Lib KB", "Size Δ%", "Ours SSIM2", "Lib SSIM2", "SSIM2 Δ"
+    );
     println!("{}", "-".repeat(78));
 
     for quality in qualities {
@@ -290,9 +326,13 @@ fn clic_detailed_quality_sweep() {
 
         for entry in &images {
             let path = entry.path();
-            let Some((rgb, width, height)) = load_png(&path) else { continue };
+            let Some((rgb, width, height)) = load_png(&path) else {
+                continue;
+            };
 
-            let Some(result) = benchmark_image(&rgb, width, height, quality) else { continue };
+            let Some(result) = benchmark_image(&rgb, width, height, quality) else {
+                continue;
+            };
             total_ours_size += result.ours_size;
             total_libwebp_size += result.libwebp_size;
             total_ours_ssim2 += result.ours_ssim2;
@@ -303,13 +343,15 @@ fn clic_detailed_quality_sweep() {
         let n = count as f64;
         let size_ratio = total_ours_size as f64 / total_libwebp_size as f64;
 
-        println!("{:>8} {:>10.1} {:>10.1} {:>+9.1}% {:>10.2} {:>10.2} {:>+10.2}",
-                 quality,
-                 total_ours_size as f64 / 1000.0,
-                 total_libwebp_size as f64 / 1000.0,
-                 (size_ratio - 1.0) * 100.0,
-                 total_ours_ssim2 / n,
-                 total_libwebp_ssim2 / n,
-                 total_ours_ssim2 / n - total_libwebp_ssim2 / n);
+        println!(
+            "{:>8} {:>10.1} {:>10.1} {:>+9.1}% {:>10.2} {:>10.2} {:>+10.2}",
+            quality,
+            total_ours_size as f64 / 1000.0,
+            total_libwebp_size as f64 / 1000.0,
+            (size_ratio - 1.0) * 100.0,
+            total_ours_ssim2 / n,
+            total_libwebp_ssim2 / n,
+            total_ours_ssim2 / n - total_libwebp_ssim2 / n
+        );
     }
 }
