@@ -45,13 +45,15 @@ See global ~/.claude/CLAUDE.md for general instructions.
 
 | Test | Our Decoder | libwebp | Speed Ratio |
 |------|-------------|---------|-------------|
-| libwebp-encoded | 6.4ms (62 MPix/s) | 2.9ms (137 MPix/s) | 2.2x slower |
-| our-encoded | 6.1ms (64 MPix/s) | 2.9ms (135 MPix/s) | 2.1x slower |
+| libwebp-encoded | 6.2ms (63 MPix/s) | 3.0ms (132 MPix/s) | 2.1x slower |
+| our-encoded | 6.1ms (65 MPix/s) | 2.8ms (138 MPix/s) | 2.1x slower |
 
 *Benchmark: 768x512 Kodak image, 100 iterations, release mode*
 
-Our decoder is ~2.1-2.2x slower than libwebp (improved from 2.5x). Recent optimizations:
+Our decoder is ~2.1x slower than libwebp (improved from 2.5x baseline). Recent optimizations:
 - **libwebp-rs style bit reader for coefficients** (16% speedup, commit 5588e44)
+- **Inlined read_tree/is_eof** (~7% additional speedup)
+- **Hardcoded tree walking for coefficient decoding** (working, ~same perf as inlined)
 - SIMD fancy upsampling for YUV→RGB conversion
 - AVX2 loop filter (16 pixels at once) - simple filter only
 
@@ -120,6 +122,20 @@ Results:
 
 The ArithmeticDecoder is still used for header/mode parsing (self.b field).
 Only coefficient reading uses the new VP8Partitions/PartitionReader.
+
+### Hardcoded Tree Walker (2026-01-22)
+
+Implemented hardcoded tree walking for coefficient decoding with state shadowing:
+- `read_coefficients_fast()` in `src/vp8.rs` uses hardcoded DCT token tree
+- `fast_coeffs` module in `src/vp8_bit_reader.rs` provides state-shadowed bit reading
+
+**Bug fix**: `get_signed_fast()` had an off-by-one error - was using decremented `bits`
+value instead of original for the value calculation. Fixed by saving `bit_pos` before
+decrementing.
+
+**Performance**: Similar to inlined original (~63-65 MPix/s). The main gain came from
+adding `#[inline(always)]` to `read_tree` and `is_eof`, not from the hardcoded tree.
+The hardcoded version is kept as it works correctly and may provide small benefits.
 
 ### Loop Filter Optimization Opportunity
 
