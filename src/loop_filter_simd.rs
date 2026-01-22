@@ -2,6 +2,12 @@
 //!
 //! The loop filter is applied to deblocking edges between macroblocks and subblocks.
 //! This implementation processes 4-16 pixels in parallel using 128-bit SIMD registers.
+//!
+//! NOTE: This code is ready but not yet integrated into the decoder. Integration
+//! requires restructuring the decoder to batch filter operations rather than
+//! calling them one edge at a time.
+
+#![allow(dead_code)]
 
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::*;
