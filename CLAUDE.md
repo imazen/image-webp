@@ -41,7 +41,7 @@ See global ~/.claude/CLAUDE.md for general instructions.
 - `src/simd_sse.rs` - SIMD implementations
 - `src/encoder.rs` - Public API, EncoderParams
 
-### Decoder Performance vs libwebp (2026-01-22)
+### Decoder Performance vs libwebp (2026-01-23)
 
 | Test | Our Decoder | libwebp | Speed Ratio |
 |------|-------------|---------|-------------|
@@ -51,6 +51,8 @@ See global ~/.claude/CLAUDE.md for general instructions.
 *Benchmark: 768x512 Kodak image, 100 iterations, release mode*
 
 Our decoder is ~1.6-1.7x slower than libwebp (improved from 2.5x baseline). Recent optimizations:
+- **SIMD chroma horizontal loop filter** - U+V processed together as 16 rows (7.8% instruction reduction, commit c3b9051)
+- **DC-only IDCT fast path** and reusable coefficient buffer (commit 9d08433)
 - **SIMD horizontal loop filter** (DoFilter4/DoFilter6 for vertical edges, commit fc4c33f)
 - **Inline coefficient tree** like libwebp's GetCoeffsFast (12% instruction reduction, commit ac47ba5)
 - **16-bit SIMD YUV conversion** ported from libwebp (18% instruction reduction, commit b7ac4b9)
@@ -59,45 +61,46 @@ Our decoder is ~1.6-1.7x slower than libwebp (improved from 2.5x baseline). Rece
 - **libwebp-rs style bit reader for coefficients** (16% speedup, commit 5588e44)
 - AVX2 loop filter (16 pixels at once) - simple filter only
 
-### Decoder Profiler Hot Spots (after SIMD horizontal filter)
+### Decoder Profiler Hot Spots (after chroma SIMD)
 | Function | % Time | Notes |
 |----------|--------|-------|
-| read_coefficients | 20.31% | Coefficient decoding |
-| fancy_upsample_8_pairs | 4.62% | YUV SIMD |
-| decode_frame_ | 4.49% | Frame processing overhead |
-| should_filter_vertical | 3.99% | Loop filter threshold check |
-| macroblock_filter_horizontal | 2.83% | Chroma only (scalar) |
-| ArithmeticDecoder | 2.63% | Mode parsing |
-| idct4x4_avx2 | 1.69% | Already SIMD |
+| read_coefficients | ~22% | Coefficient decoding |
+| fancy_upsample_8_pairs | ~5% | YUV SIMD |
+| decode_frame_ | ~5% | Frame processing overhead |
+| should_filter_vertical | ~4% | Loop filter threshold check |
+| ArithmeticDecoder | ~3% | Mode parsing |
+| idct4x4_avx2 | ~2% | Already SIMD |
+| normal_h_filter_uv_* | ~2% | Chroma SIMD (new) |
 
 ### Detailed Callgrind/Cachegrind Analysis (2026-01-23)
 
-**Per-decode instruction count (isolated runs):**
+**Per-decode instruction count (after chroma SIMD, commit c3b9051):**
 | Metric | Ours | libwebp | Ratio |
 |--------|------|---------|-------|
-| Instructions | 85.4M | 46.6M | **1.83x** |
-| Memory reads | 12.9M | 6.7M | 1.92x |
-| Memory writes | 10.2M | 4.9M | 2.09x |
+| Instructions | ~78.7M | 46.6M | **1.69x** |
+| Memory reads | ~12M | 6.7M | 1.8x |
+| Memory writes | ~9M | 4.9M | 1.8x |
 | D1 read miss % | 0.33% | 0.70% | Better! |
+
+*Note: 15.63B total / 100 iterations × 2 (warmup) = 78.1M. Improved from 85.4M (7.8% reduction).*
 
 **Instruction breakdown comparison:**
 | Category | Ours | libwebp | Extra per decode |
 |----------|------|---------|------------------|
-| Coeff reading | 25.5M (30%) | 20.5M (44%) | +5M |
-| Loop filter total | ~20M (23%) | ~4M (8%) | **+16M** |
+| Coeff reading | ~24M (30%) | 20.5M (44%) | +3.5M |
+| Loop filter total | ~14M (18%) | ~4M (8%) | **+10M** |
 | YUV conversion | ~6M (8%) | ~4M (9%) | +2M |
-| memset zeroing | 2.5M (3%) | ~0 | **+2.5M** |
 | ArithmeticDecoder (modes) | 3.3M (4%) | 0 | +3.3M |
 
-**Root causes of the 1.83x instruction gap:**
-1. **Loop filter scalar overhead** - `should_filter_vertical` called per-pixel (6%), chroma uses full scalar path
-2. **Buffer zeroing** - memset for coefficient blocks costs 2.5M/decode
-3. **Mode parsing** - ArithmeticDecoder still used (3.3M/decode) vs libwebp's inline bit reader
-4. **Coefficient reading** - 24% more instructions than libwebp despite similar algorithm
+**Root causes of the remaining 1.69x instruction gap:**
+1. **Loop filter overhead** - still 2.5x more instructions than libwebp despite SIMD
+2. **Mode parsing** - ArithmeticDecoder still used (3.3M/decode) vs libwebp's inline bit reader
+3. **Coefficient reading** - ~17% more instructions than libwebp
+4. **Function call overhead** - Rust abstractions vs libwebp's inline macros
 
 Loop filter now uses SIMD for:
-- Simple filter: both V and H edges (luma)
-- Normal filter: V edges (luma), H edges (luma with SIMD, chroma scalar)
+- Simple filter: both V and H edges (luma + chroma)
+- Normal filter: V edges (luma), H edges (luma + chroma with SIMD)
 
 ### SIMD Decoder Optimizations
 - `src/yuv_simd.rs` - SSE2 YUV→RGB (ported from libwebp, commit b7ac4b9)
@@ -106,10 +109,11 @@ Loop filter now uses SIMD for:
   - Processes 32 pixels at a time (simple) or 16 (fancy upsampling)
   - `unsafe-simd` feature now enabled by default
 - `src/loop_filter_avx2.rs` - SSE4.1 loop filter (16 pixels at once)
-  - **Normal filter SIMD for both V and H edges** (luma only, commit fc4c33f)
+  - **Normal filter SIMD for both V and H edges** (luma, commit fc4c33f)
+  - **Chroma SIMD** - U+V processed together as 16 rows (commit c3b9051)
   - Uses transpose technique for horizontal filtering (16 rows × 8 cols)
-  - Simple filter: both V and H edges have SIMD
-  - Chroma filtering still scalar (8 rows, not 16)
+  - Simple filter: both V and H edges have SIMD (luma + chroma)
+  - Normal filter: V edges (luma), H edges (luma + chroma)
 - `src/vp8_bit_reader.rs` - libwebp-rs style bit reader for coefficients
   - Uses VP8GetBitAlt algorithm with 56-bit buffer
   - `leading_zeros()` for normalization (single LZCNT instruction)
@@ -118,23 +122,22 @@ Loop filter now uses SIMD for:
 ### TODO - Remaining Optimization Opportunities
 Priority ordered by instruction savings potential:
 
-1. **Loop filter SIMD for chroma** (~8M savings) - 8 rows needs different approach than 16-row luma
-   - `should_filter_vertical` called per-pixel is 6% of time
-   - Chroma uses full scalar path (macroblock_filter_horizontal at 4.1%)
-
-2. **Eliminate buffer zeroing** (~2.5M savings) - memset for coefficient blocks
-   - Consider using uninitialized memory or lazy zeroing
-   - `MaybeUninit` for coefficient blocks?
-
-3. **Replace ArithmeticDecoder for mode parsing** (~3.3M savings)
+1. **Replace ArithmeticDecoder for mode parsing** (~3.3M savings)
    - Use libwebp-style bit reader for `self.b` field
    - Only coefficient reading uses fast path currently
 
-4. **Reduce coefficient reading overhead** (~5M savings)
-   - Still 24% more instructions than libwebp despite similar algorithm
+2. **Reduce coefficient reading overhead** (~3.5M savings)
+   - Still ~17% more instructions than libwebp
    - May be Rust abstraction overhead or bounds checking
 
+3. **Loop filter overhead** (~6M savings)
+   - Still 2.5x more instructions than libwebp despite SIMD
+   - Per-pixel threshold checks (`should_filter_*`) are expensive
+   - Consider batch threshold computation
+
 Completed:
+- [x] ~~Loop filter SIMD for chroma~~ (commit c3b9051) - U+V together as 16 rows, 7.8% reduction
+- [x] ~~DC-only IDCT and reusable coefficient buffer~~ (commit 9d08433)
 - [x] ~~Row cache with extra rows for loop filter cache locality~~ (commit c16995f)
 - [x] ~~Add SIMD horizontal normal filter~~ (commit fc4c33f)
 - [x] ~~Inline coefficient tree like GetCoeffsFast~~ (commit ac47ba5)
@@ -168,18 +171,14 @@ Results:
 The ArithmeticDecoder is still used for header/mode parsing (self.b field).
 Only coefficient reading uses the new VP8Partitions/PartitionReader.
 
-### Loop Filter Optimization Opportunity
+### Loop Filter Optimization (Resolved 2026-01-23)
 
-The normal filter path (when `filter_type == false`) processes rows individually:
-```rust
-for y in 0..16 {
-    loop_filter::subblock_filter_horizontal(...);
-}
-```
+Normal filter now uses SIMD for horizontal edges (both luma and chroma).
+Chroma is handled by processing U and V planes together as 16 rows, reusing
+the existing 16-row infrastructure. See commit c3b9051.
 
-SIMD opportunity: Process 16 rows at once like the simple filter does.
-Current SIMD exists in `loop_filter_avx2.rs` but only for simple filter.
-Adding SIMD normal filter (DoFilter4/DoFilter6) could save ~5-8% of total time.
+Remaining loop filter overhead (~6M extra instructions vs libwebp) appears
+to come from per-pixel threshold checks rather than the filter math itself.
 
 ### libwebp-rs Mechanical Translation Comparison (2026-01-22)
 
