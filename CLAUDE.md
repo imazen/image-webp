@@ -45,12 +45,12 @@ See global ~/.claude/CLAUDE.md for general instructions.
 
 | Test | Our Decoder | libwebp | Speed Ratio |
 |------|-------------|---------|-------------|
-| libwebp-encoded | 6.08ms (65 MPix/s) | 3.07ms (128 MPix/s) | 1.98x slower |
-| our-encoded | 5.10ms (77 MPix/s) | 2.96ms (133 MPix/s) | 1.72x slower |
+| libwebp-encoded | 5.32ms (74 MPix/s) | 3.28ms (120 MPix/s) | 1.62x slower |
+| our-encoded | 4.91ms (80 MPix/s) | 2.86ms (137 MPix/s) | 1.71x slower |
 
 *Benchmark: 768x512 Kodak image, 100 iterations, release mode*
 
-Our decoder is ~1.7-2.0x slower than libwebp (improved from 2.5x baseline). Recent optimizations:
+Our decoder is ~1.6-1.7x slower than libwebp (improved from 2.5x baseline). Recent optimizations:
 - **SIMD horizontal loop filter** (DoFilter4/DoFilter6 for vertical edges, commit fc4c33f)
 - **Inline coefficient tree** like libwebp's GetCoeffsFast (12% instruction reduction, commit ac47ba5)
 - **16-bit SIMD YUV conversion** ported from libwebp (18% instruction reduction, commit b7ac4b9)
