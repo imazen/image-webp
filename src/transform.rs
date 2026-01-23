@@ -3,6 +3,15 @@ const CONST1: i64 = 20091;
 /// 16 bit fixed point version of sin(PI/8) * sqrt(2)
 const CONST2: i64 = 35468;
 
+/// DC-only inverse transform: fills all 16 positions with (DC+4)>>3
+/// Used when a block has only DC coefficient (no AC), avoiding full IDCT.
+/// The input block[0] contains the quantized DC value; AC positions are ignored.
+#[inline(always)]
+pub(crate) fn idct4x4_dc(block: &mut [i32; 16]) {
+    let dc = (block[0] + 4) >> 3;
+    block.fill(dc);
+}
+
 // inverse discrete cosine transform, used in decoding
 pub(crate) fn idct4x4(block: &mut [i32]) {
     #[cfg(feature = "unsafe-simd")]

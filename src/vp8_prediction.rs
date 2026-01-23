@@ -2,7 +2,6 @@
 //!
 //! Functions for doing prediction and for setting up buffers for prediction
 
-use crate::vp8_common::IntraMode;
 
 /// Luma prediction block stride - 32 bytes for cache alignment (matches libwebp BPS)
 /// Layout: 1 border pixel + 16 luma pixels + 4 top-right + padding to 32
@@ -158,32 +157,6 @@ fn avg3(left: u8, this: u8, right: u8) -> u8 {
 fn avg2(this: u8, right: u8) -> u8 {
     let avg = (u16::from(this) + u16::from(right) + 1) >> 1;
     avg as u8
-}
-
-pub(crate) fn predict_4x4(ws: &mut [u8], stride: usize, modes: &[IntraMode], resdata: &[i32]) {
-    for sby in 0usize..4 {
-        for sbx in 0usize..4 {
-            let i = sbx + sby * 4;
-            let y0 = sby * 4 + 1;
-            let x0 = sbx * 4 + 1;
-
-            match modes[i] {
-                IntraMode::TM => predict_tmpred(ws, 4, x0, y0, stride),
-                IntraMode::VE => predict_bvepred(ws, x0, y0, stride),
-                IntraMode::HE => predict_bhepred(ws, x0, y0, stride),
-                IntraMode::DC => predict_bdcpred(ws, x0, y0, stride),
-                IntraMode::LD => predict_bldpred(ws, x0, y0, stride),
-                IntraMode::RD => predict_brdpred(ws, x0, y0, stride),
-                IntraMode::VR => predict_bvrpred(ws, x0, y0, stride),
-                IntraMode::VL => predict_bvlpred(ws, x0, y0, stride),
-                IntraMode::HD => predict_bhdpred(ws, x0, y0, stride),
-                IntraMode::HU => predict_bhupred(ws, x0, y0, stride),
-            }
-
-            let rb: &[i32; 16] = resdata[i * 16..][..16].try_into().unwrap();
-            add_residue(ws, rb, y0, x0, stride);
-        }
-    }
 }
 
 pub(crate) fn predict_vpred(a: &mut [u8], size: usize, x0: usize, y0: usize, stride: usize) {

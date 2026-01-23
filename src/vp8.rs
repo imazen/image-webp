@@ -508,6 +508,11 @@ pub struct Vp8Decoder<R> {
     cache_y_stride: usize,   // mbwidth * 16
     cache_uv_stride: usize,  // mbwidth * 8
     extra_y_rows: usize,     // 8 for normal filter, 2 for simple, 0 for none
+
+    // Reusable coefficient buffer for macroblock decoding.
+    // Initialized to zeros and maintained as zeros between macroblocks.
+    // Each 16-element block is cleared after use in intra_predict_*.
+    coeff_blocks: [i32; 384],
 }
 
 impl<R: Read> Vp8Decoder<R> {
@@ -561,6 +566,8 @@ impl<R: Read> Vp8Decoder<R> {
             cache_y_stride: 0,
             cache_uv_stride: 0,
             extra_y_rows: 0,
+
+            coeff_blocks: [0i32; 384],
         }
     }
 
@@ -914,7 +921,7 @@ impl<R: Read> Vp8Decoder<R> {
         self.b.check(res, mb)
     }
 
-    fn intra_predict_luma(&mut self, mbx: usize, mby: usize, mb: &MacroBlock, resdata: &[i32]) {
+    fn intra_predict_luma(&mut self, mbx: usize, mby: usize, mb: &MacroBlock) {
         let stride = LUMA_STRIDE;
         let mw = self.mbwidth as usize;
         let mut ws = create_border_luma(mbx, mby, mw, &self.top_border_y, &self.left_border_y);
@@ -924,19 +931,47 @@ impl<R: Read> Vp8Decoder<R> {
             LumaMode::H => predict_hpred(&mut ws, 16, 1, 1, stride),
             LumaMode::TM => predict_tmpred(&mut ws, 16, 1, 1, stride),
             LumaMode::DC => predict_dcpred(&mut ws, 16, stride, mby != 0, mbx != 0),
-            LumaMode::B => predict_4x4(&mut ws, stride, &mb.bpred, resdata),
+            LumaMode::B => {
+                // B-mode: predict and add residue for each 4x4 sub-block
+                for sby in 0usize..4 {
+                    for sbx in 0usize..4 {
+                        let i = sbx + sby * 4;
+                        let y0 = sby * 4 + 1;
+                        let x0 = sbx * 4 + 1;
+
+                        match mb.bpred[i] {
+                            IntraMode::TM => predict_tmpred(&mut ws, 4, x0, y0, stride),
+                            IntraMode::VE => predict_bvepred(&mut ws, x0, y0, stride),
+                            IntraMode::HE => predict_bhepred(&mut ws, x0, y0, stride),
+                            IntraMode::DC => predict_bdcpred(&mut ws, x0, y0, stride),
+                            IntraMode::LD => predict_bldpred(&mut ws, x0, y0, stride),
+                            IntraMode::RD => predict_brdpred(&mut ws, x0, y0, stride),
+                            IntraMode::VR => predict_bvrpred(&mut ws, x0, y0, stride),
+                            IntraMode::VL => predict_bvlpred(&mut ws, x0, y0, stride),
+                            IntraMode::HD => predict_bhdpred(&mut ws, x0, y0, stride),
+                            IntraMode::HU => predict_bhupred(&mut ws, x0, y0, stride),
+                        }
+
+                        let rb: &[i32; 16] = self.coeff_blocks[i * 16..][..16].try_into().unwrap();
+                        add_residue(&mut ws, rb, y0, x0, stride);
+                        // Clear block after use to maintain zeros invariant
+                        self.coeff_blocks[i * 16..][..16].fill(0);
+                    }
+                }
+            }
         }
 
         if mb.luma_mode != LumaMode::B {
             for y in 0usize..4 {
                 for x in 0usize..4 {
                     let i = x + y * 4;
-                    // Create a reference to a [i32; 16] array for add_residue (slices of size 16 do not work).
-                    let rb: &[i32; 16] = resdata[i * 16..][..16].try_into().unwrap();
+                    let rb: &[i32; 16] = self.coeff_blocks[i * 16..][..16].try_into().unwrap();
                     let y0 = 1 + y * 4;
                     let x0 = 1 + x * 4;
 
                     add_residue(&mut ws, rb, y0, x0, stride);
+                    // Clear block after use
+                    self.coeff_blocks[i * 16..][..16].fill(0);
                 }
             }
         }
@@ -959,7 +994,7 @@ impl<R: Read> Vp8Decoder<R> {
         }
     }
 
-    fn intra_predict_chroma(&mut self, mbx: usize, mby: usize, mb: &MacroBlock, resdata: &[i32]) {
+    fn intra_predict_chroma(&mut self, mbx: usize, mby: usize, mb: &MacroBlock) {
         let stride = CHROMA_STRIDE;
 
         //8x8 with left top border of 1
@@ -988,15 +1023,20 @@ impl<R: Read> Vp8Decoder<R> {
         for y in 0usize..2 {
             for x in 0usize..2 {
                 let i = x + y * 2;
-                let urb: &[i32; 16] = resdata[16 * 16 + i * 16..][..16].try_into().unwrap();
+                let u_idx = 16 + i; // U blocks at indices 16-19
+                let v_idx = 20 + i; // V blocks at indices 20-23
 
+                let urb: &[i32; 16] = self.coeff_blocks[u_idx * 16..][..16].try_into().unwrap();
                 let y0 = 1 + y * 4;
                 let x0 = 1 + x * 4;
                 add_residue(&mut uws, urb, y0, x0, stride);
+                // Clear U block after use
+                self.coeff_blocks[u_idx * 16..][..16].fill(0);
 
-                let vrb: &[i32; 16] = resdata[20 * 16 + i * 16..][..16].try_into().unwrap();
-
+                let vrb: &[i32; 16] = self.coeff_blocks[v_idx * 16..][..16].try_into().unwrap();
                 add_residue(&mut vws, vrb, y0, x0, stride);
+                // Clear V block after use
+                self.coeff_blocks[v_idx * 16..][..16].fill(0);
             }
         }
 
@@ -1016,6 +1056,103 @@ impl<R: Read> Vp8Decoder<R> {
 
     /// Read DCT coefficients using libwebp's inline tree structure.
     /// This mirrors GetCoeffsFast from libwebp for maximum performance.
+    /// Writes to self.coeff_blocks at the given block index.
+    fn read_coefficients_to_block(
+        &mut self,
+        block_idx: usize,
+        p: usize,
+        plane: Plane,
+        complexity: usize,
+        dcq: i16,
+        acq: i16,
+    ) -> Result<bool, DecodingError> {
+        debug_assert!(complexity <= 2);
+
+        let first = if plane == Plane::YCoeff1 { 1 } else { 0 };
+        let probs = &self.token_probs[plane as usize];
+        let mut reader = self.partitions.reader(p);
+
+        let mut n = first;
+        let mut band = COEFF_BANDS[n] as usize;
+        let mut prob = &probs[band][complexity];
+
+        while n < 16 {
+            if reader.get_bit(prob[0].prob) == 0 {
+                break;
+            }
+
+            while reader.get_bit(prob[1].prob) == 0 {
+                n += 1;
+                if n >= 16 {
+                    if reader.is_eof() {
+                        return Err(DecodingError::BitStreamError);
+                    }
+                    return Ok(true);
+                }
+                band = COEFF_BANDS[n] as usize;
+                prob = &probs[band][0];
+            }
+
+            let v: i32;
+            let next_ctx: usize;
+
+            if reader.get_bit(prob[2].prob) == 0 {
+                v = 1;
+                next_ctx = 1;
+            } else {
+                if reader.get_bit(prob[3].prob) == 0 {
+                    if reader.get_bit(prob[4].prob) == 0 {
+                        v = 2;
+                    } else {
+                        v = 3 + reader.get_bit(prob[5].prob);
+                    }
+                } else {
+                    if reader.get_bit(prob[6].prob) == 0 {
+                        if reader.get_bit(prob[7].prob) == 0 {
+                            v = 5 + reader.get_bit(159);
+                        } else {
+                            v = 7 + 2 * reader.get_bit(165) + reader.get_bit(145);
+                        }
+                    } else {
+                        let bit1 = reader.get_bit(prob[8].prob);
+                        let bit0 = reader.get_bit(prob[9 + bit1 as usize].prob);
+                        let cat = (2 * bit1 + bit0) as usize;
+
+                        let cat_probs = &PROB_DCT_CAT[2 + cat];
+                        let mut extra = 0i32;
+                        for &p in cat_probs.iter() {
+                            if p == 0 {
+                                break;
+                            }
+                            extra = extra + extra + reader.get_bit(p);
+                        }
+                        v = 3 + (8 << cat) + extra;
+                    }
+                }
+                next_ctx = 2;
+            }
+
+            let signed_v = if reader.get_bit(128) != 0 { -v } else { v };
+
+            let zigzag = ZIGZAG[n] as usize;
+            let q = if zigzag > 0 { acq } else { dcq };
+            self.coeff_blocks[block_idx * 16 + zigzag] = signed_v * i32::from(q);
+
+            n += 1;
+            if n < 16 {
+                band = COEFF_BANDS[n] as usize;
+                prob = &probs[band][next_ctx];
+            }
+        }
+
+        if reader.is_eof() {
+            return Err(DecodingError::BitStreamError);
+        }
+        Ok(n > first)
+    }
+
+    /// Read DCT coefficients into a provided buffer.
+    /// Used for Y2 (WHT) block which is processed separately.
     fn read_coefficients(
         &mut self,
         block: &mut [i32; 16],
@@ -1031,23 +1168,15 @@ impl<R: Read> Vp8Decoder<R> {
         let probs = &self.token_probs[plane as usize];
         let mut reader = self.partitions.reader(p);
 
-        // Probability indices in tree nodes match libwebp:
-        // [0] = not EOB, [1] = not zero, [2] = not 1
-        // [3] = >=5 vs 2/3/4, [4] = 3/4 vs 2, [5] = 4 vs 3
-        // [6] = CAT3-6 vs CAT1/2, [7] = CAT2 vs CAT1
-        // [8] = CAT5/6 vs CAT3/4, [9] = CAT4 vs CAT3, [10] = CAT6 vs CAT5
-
         let mut n = first;
         let mut band = COEFF_BANDS[n] as usize;
         let mut prob = &probs[band][complexity];
 
         while n < 16 {
-            // Check for EOB (p[0])
             if reader.get_bit(prob[0].prob) == 0 {
                 break;
             }
 
-            // Skip zeros (p[1]) - libwebp style loop
             while reader.get_bit(prob[1].prob) == 0 {
                 n += 1;
                 if n >= 16 {
@@ -1057,46 +1186,35 @@ impl<R: Read> Vp8Decoder<R> {
                     return Ok(true);
                 }
                 band = COEFF_BANDS[n] as usize;
-                prob = &probs[band][0]; // context 0 after zero
+                prob = &probs[band][0];
             }
 
-            // Non-zero coefficient
             let v: i32;
             let next_ctx: usize;
 
-            // Check if value is 1 (p[2])
             if reader.get_bit(prob[2].prob) == 0 {
                 v = 1;
                 next_ctx = 1;
             } else {
-                // Larger value - inline GetLargeValue
-                // Check if 2/3/4 vs categories (p[3])
                 if reader.get_bit(prob[3].prob) == 0 {
-                    // Value is 2, 3, or 4
                     if reader.get_bit(prob[4].prob) == 0 {
                         v = 2;
                     } else {
                         v = 3 + reader.get_bit(prob[5].prob);
                     }
                 } else {
-                    // Category token (CAT1-CAT6)
                     if reader.get_bit(prob[6].prob) == 0 {
-                        // CAT1 or CAT2
                         if reader.get_bit(prob[7].prob) == 0 {
-                            // CAT1: base 5, 1 extra bit
                             v = 5 + reader.get_bit(159);
                         } else {
-                            // CAT2: base 7, 2 extra bits
                             v = 7 + 2 * reader.get_bit(165) + reader.get_bit(145);
                         }
                     } else {
-                        // CAT3-6: use p[8], p[9+bit1]
                         let bit1 = reader.get_bit(prob[8].prob);
                         let bit0 = reader.get_bit(prob[9 + bit1 as usize].prob);
                         let cat = (2 * bit1 + bit0) as usize;
 
-                        // Read extra bits from category probability table
-                        let cat_probs = &PROB_DCT_CAT[2 + cat]; // CAT3 is index 2
+                        let cat_probs = &PROB_DCT_CAT[2 + cat];
                         let mut extra = 0i32;
                         for &p in cat_probs.iter() {
                             if p == 0 {
@@ -1104,14 +1222,12 @@ impl<R: Read> Vp8Decoder<R> {
                             }
                             extra = extra + extra + reader.get_bit(p);
                         }
-                        // CAT3: 11, CAT4: 19, CAT5: 35, CAT6: 67
                         v = 3 + (8 << cat) + extra;
                     }
                 }
                 next_ctx = 2;
             }
 
-            // Read sign and apply
             let signed_v = if reader.get_bit(128) != 0 { -v } else { v };
 
             let zigzag = ZIGZAG[n] as usize;
@@ -1136,9 +1252,11 @@ impl<R: Read> Vp8Decoder<R> {
         mb: &mut MacroBlock,
         mbx: usize,
         p: usize,
-    ) -> Result<[i32; 384], DecodingError> {
+    ) -> Result<(), DecodingError> {
+        // Uses self.coeff_blocks which is maintained as zeros between calls.
+        // After each IDCT, the block is left with transformed data for intra_predict to use.
+        // intra_predict_* is responsible for clearing blocks after use.
         let sindex = mb.segmentid as usize;
-        let mut blocks = [0i32; 384];
         let mut plane = if mb.luma_mode == LumaMode::B {
             Plane::YCoeff0
         } else {
@@ -1158,7 +1276,7 @@ impl<R: Read> Vp8Decoder<R> {
             transform::iwht4x4(&mut block);
 
             for k in 0usize..16 {
-                blocks[16 * k] = block[k];
+                self.coeff_blocks[16 * k] = block[k];
             }
 
             plane = Plane::YCoeff1;
@@ -1168,18 +1286,23 @@ impl<R: Read> Vp8Decoder<R> {
             let mut left = self.left.complexity[y + 1];
             for x in 0usize..4 {
                 let i = x + y * 4;
-                let block = &mut blocks[i * 16..][..16];
-                let block: &mut [i32; 16] = block.try_into().unwrap();
-
                 let complexity = self.top[mbx].complexity[x + 1] + left;
                 let dcq = self.segment[sindex].ydc;
                 let acq = self.segment[sindex].yac;
 
-                let n = self.read_coefficients(block, p, plane, complexity as usize, dcq, acq)?;
+                let n = self.read_coefficients_to_block(i, p, plane, complexity as usize, dcq, acq)?;
+
+                // Get block slice for IDCT (after read_coefficients_to_block completes)
+                let block = &mut self.coeff_blocks[i * 16..][..16];
+                let block: &mut [i32; 16] = block.try_into().unwrap();
 
                 if block[0] != 0 || n {
                     mb.non_zero_dct = true;
-                    transform::idct4x4(block);
+                    if n {
+                        transform::idct4x4(block);
+                    } else {
+                        transform::idct4x4_dc(block);
+                    }
                 }
 
                 left = if n { 1 } else { 0 };
@@ -1197,18 +1320,22 @@ impl<R: Read> Vp8Decoder<R> {
 
                 for x in 0usize..2 {
                     let i = x + y * 2 + if j == 5 { 16 } else { 20 };
-                    let block = &mut blocks[i * 16..][..16];
-                    let block: &mut [i32; 16] = block.try_into().unwrap();
-
                     let complexity = self.top[mbx].complexity[x + j] + left;
                     let dcq = self.segment[sindex].uvdc;
                     let acq = self.segment[sindex].uvac;
 
-                    let n =
-                        self.read_coefficients(block, p, plane, complexity as usize, dcq, acq)?;
+                    let n = self.read_coefficients_to_block(i, p, plane, complexity as usize, dcq, acq)?;
+
+                    let block = &mut self.coeff_blocks[i * 16..][..16];
+                    let block: &mut [i32; 16] = block.try_into().unwrap();
+
                     if block[0] != 0 || n {
                         mb.non_zero_dct = true;
-                        transform::idct4x4(block);
+                        if n {
+                            transform::idct4x4(block);
+                        } else {
+                            transform::idct4x4_dc(block);
+                        }
                     }
 
                     left = if n { 1 } else { 0 };
@@ -1219,7 +1346,7 @@ impl<R: Read> Vp8Decoder<R> {
             }
         }
 
-        Ok(blocks)
+        Ok(())
     }
 
     /// Filters a row of macroblocks in the cache
@@ -1615,9 +1742,11 @@ impl<R: Read> Vp8Decoder<R> {
             // Decode all macroblocks in this row (writes to cache)
             for mbx in 0..self.mbwidth as usize {
                 let mut mb = self.read_macroblock_header(mbx)?;
-                let blocks = if !mb.coeffs_skipped {
-                    self.read_residual_data(&mut mb, mbx, p)?
+                if !mb.coeffs_skipped {
+                    // Decode coefficients into self.coeff_blocks
+                    self.read_residual_data(&mut mb, mbx, p)?;
                 } else {
+                    // self.coeff_blocks is already zeros (invariant maintained by intra_predict_*)
                     if mb.luma_mode != LumaMode::B {
                         self.left.complexity[0] = 0;
                         self.top[mbx].complexity[0] = 0;
@@ -1627,12 +1756,11 @@ impl<R: Read> Vp8Decoder<R> {
                         self.left.complexity[i] = 0;
                         self.top[mbx].complexity[i] = 0;
                     }
+                }
 
-                    [0i32; 384]
-                };
-
-                self.intra_predict_luma(mbx, mby, &mb, &blocks);
-                self.intra_predict_chroma(mbx, mby, &mb, &blocks);
+                // intra_predict_* reads from self.coeff_blocks and clears after use
+                self.intra_predict_luma(mbx, mby, &mb);
+                self.intra_predict_chroma(mbx, mby, &mb);
 
                 self.macroblocks.push(mb);
             }
