@@ -1,4 +1,22 @@
 //! Encoding of WebP images.
+//!
+//! # Builder API (webpx-compatible)
+//!
+//! ```rust
+//! use zenwebp::{Encoder, Preset};
+//!
+//! let rgba_data = vec![255u8; 4 * 4 * 4]; // 4x4 RGBA image
+//! let webp = Encoder::new_rgba(&rgba_data, 4, 4)
+//!     .preset(Preset::Photo)
+//!     .quality(85.0)
+//!     .method(4)
+//!     .encode()?;
+//! # Ok::<(), zenwebp::EncodingError>(())
+//! ```
+//!
+//! # Legacy API
+//!
+//! The [`WebPEncoder`] type provides the original API for streaming output.
 use std::collections::BinaryHeap;
 use std::io::{self, Write};
 use std::slice::ChunksExact;
@@ -6,6 +24,33 @@ use std::slice::ChunksExact;
 use quick_error::quick_error;
 
 use crate::vp8_encoder::encode_frame_lossy;
+
+/// Content-aware encoding presets.
+///
+/// These presets configure the encoder for different types of content,
+/// optimizing the balance between file size and visual quality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum Preset {
+    /// Default preset, balanced for general use.
+    #[default]
+    Default,
+    /// Digital picture (portrait, indoor shot).
+    /// Optimizes for smooth skin tones and indoor lighting.
+    Picture,
+    /// Outdoor photograph with natural lighting.
+    /// Best for landscapes, nature, and outdoor scenes.
+    Photo,
+    /// Hand or line drawing with high-contrast details.
+    /// Preserves sharp edges and fine lines.
+    Drawing,
+    /// Small-sized colorful images like icons or sprites.
+    /// Optimizes for small dimensions and sharp edges.
+    Icon,
+    /// Text-heavy images.
+    /// Preserves text readability and sharp character edges.
+    Text,
+}
 
 /// Color type of the image.
 ///
@@ -28,6 +73,15 @@ impl ColorType {
     fn has_alpha(self) -> bool {
         self == ColorType::La8 || self == ColorType::Rgba8
     }
+
+    fn bytes_per_pixel(self) -> usize {
+        match self {
+            ColorType::L8 => 1,
+            ColorType::La8 => 2,
+            ColorType::Rgb8 => 3,
+            ColorType::Rgba8 => 4,
+        }
+    }
 }
 
 quick_error! {
@@ -45,6 +99,11 @@ quick_error! {
         /// The image dimensions are not allowed by the WebP format.
         InvalidDimensions {
             display("Invalid dimensions")
+        }
+
+        /// The input buffer is too small.
+        InvalidBufferSize(msg: String) {
+            display("Invalid buffer size: {}", msg)
         }
     }
 }
@@ -72,7 +131,7 @@ impl<W: Write> BitWriter<W> {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        if self.nbits % 8 != 0 {
+        if !self.nbits.is_multiple_of(8) {
             self.write_bits(0, 8 - self.nbits % 8)?;
         }
         if self.nbits > 0 {
@@ -401,6 +460,505 @@ impl EncoderParams {
         }
     }
 }
+
+// ============================================================================
+// Builder-style Encoder API (webpx-compatible)
+// ============================================================================
+
+/// WebP encoder configuration. Dimension-independent, reusable across images.
+///
+/// Use the builder pattern to configure encoding options, then call one of
+/// the `encode_*` methods to create an encoder.
+///
+/// # Example
+///
+/// ```rust
+/// use zenwebp::{EncoderConfig, Preset};
+///
+/// let config = EncoderConfig::new()
+///     .quality(85.0)
+///     .preset(Preset::Photo)
+///     .method(4);
+///
+/// // Reuse config for multiple images
+/// let image1 = vec![0u8; 4 * 4 * 4]; // 4x4 RGBA
+/// let image2 = vec![0u8; 8 * 6 * 4]; // 8x6 RGBA
+/// let webp1 = config.encode_rgba(&image1, 4, 4)?;
+/// let webp2 = config.encode_rgba(&image2, 8, 6)?;
+/// # Ok::<(), zenwebp::EncodingError>(())
+/// ```
+#[derive(Debug, Clone)]
+pub struct EncoderConfig {
+    quality: f32,
+    preset: Preset,
+    lossless: bool,
+    method: u8,
+    near_lossless: u8,
+    alpha_quality: u8,
+    exact: bool,
+    target_size: u32,
+    use_sharp_yuv: bool,
+}
+
+impl Default for EncoderConfig {
+    fn default() -> Self {
+        Self {
+            quality: 75.0,
+            preset: Preset::Default,
+            lossless: false,
+            method: 4,
+            near_lossless: 100,
+            alpha_quality: 100,
+            exact: false,
+            target_size: 0,
+            use_sharp_yuv: false,
+        }
+    }
+}
+
+impl EncoderConfig {
+    /// Create a new encoder configuration with default settings.
+    ///
+    /// Default: lossy encoding at quality 75, method 4, no preset.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create a lossless encoder configuration.
+    #[must_use]
+    pub fn new_lossless() -> Self {
+        Self {
+            lossless: true,
+            quality: 75.0,
+            ..Self::default()
+        }
+    }
+
+    /// Create a configuration with preset and quality.
+    #[must_use]
+    pub fn with_preset(preset: Preset, quality: f32) -> Self {
+        Self {
+            preset,
+            quality,
+            ..Self::default()
+        }
+    }
+
+    /// Set encoding quality (0.0 = smallest, 100.0 = best).
+    #[must_use]
+    pub fn quality(mut self, quality: f32) -> Self {
+        self.quality = quality.clamp(0.0, 100.0);
+        self
+    }
+
+    /// Set content-aware preset.
+    #[must_use]
+    pub fn preset(mut self, preset: Preset) -> Self {
+        self.preset = preset;
+        self
+    }
+
+    /// Enable or disable lossless compression.
+    #[must_use]
+    pub fn lossless(mut self, lossless: bool) -> Self {
+        self.lossless = lossless;
+        self
+    }
+
+    /// Set quality/speed tradeoff (0 = fast, 6 = slower but better).
+    #[must_use]
+    pub fn method(mut self, method: u8) -> Self {
+        self.method = method.min(6);
+        self
+    }
+
+    /// Set near-lossless preprocessing (0 = max preprocessing, 100 = off).
+    #[must_use]
+    pub fn near_lossless(mut self, value: u8) -> Self {
+        self.near_lossless = value.min(100);
+        self
+    }
+
+    /// Set alpha plane quality (0-100, default 100).
+    #[must_use]
+    pub fn alpha_quality(mut self, quality: u8) -> Self {
+        self.alpha_quality = quality.min(100);
+        self
+    }
+
+    /// Preserve exact RGB values under transparent areas.
+    #[must_use]
+    pub fn exact(mut self, exact: bool) -> Self {
+        self.exact = exact;
+        self
+    }
+
+    /// Set target file size in bytes (0 = disabled).
+    #[must_use]
+    pub fn target_size(mut self, size: u32) -> Self {
+        self.target_size = size;
+        self
+    }
+
+    /// Use sharp YUV conversion (slower but better quality).
+    #[must_use]
+    pub fn sharp_yuv(mut self, enable: bool) -> Self {
+        self.use_sharp_yuv = enable;
+        self
+    }
+
+    /// Get the quality setting.
+    #[must_use]
+    pub fn get_quality(&self) -> f32 {
+        self.quality
+    }
+
+    /// Get the preset.
+    #[must_use]
+    pub fn get_preset(&self) -> Preset {
+        self.preset
+    }
+
+    /// Check if lossless mode is enabled.
+    #[must_use]
+    pub fn is_lossless(&self) -> bool {
+        self.lossless
+    }
+
+    /// Get the method (quality/speed tradeoff).
+    #[must_use]
+    pub fn get_method(&self) -> u8 {
+        self.method
+    }
+
+    /// Convert to internal EncoderParams.
+    fn to_params(&self) -> EncoderParams {
+        EncoderParams {
+            use_predictor_transform: true,
+            use_lossy: !self.lossless,
+            lossy_quality: self.quality.round() as u8,
+            method: self.method,
+        }
+    }
+
+    /// Encode RGBA byte data to WebP.
+    pub fn encode_rgba(
+        &self,
+        data: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<u8>, EncodingError> {
+        validate_buffer_size(data.len(), width, height, 4)?;
+        let mut output = Vec::new();
+        let mut encoder = WebPEncoder::new(&mut output);
+        encoder.set_params(self.to_params());
+        encoder.encode(data, width, height, ColorType::Rgba8)?;
+        Ok(output)
+    }
+
+    /// Encode RGB byte data to WebP (no alpha).
+    pub fn encode_rgb(
+        &self,
+        data: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<u8>, EncodingError> {
+        validate_buffer_size(data.len(), width, height, 3)?;
+        let mut output = Vec::new();
+        let mut encoder = WebPEncoder::new(&mut output);
+        encoder.set_params(self.to_params());
+        encoder.encode(data, width, height, ColorType::Rgb8)?;
+        Ok(output)
+    }
+}
+
+/// Input pixel format for the encoder.
+enum EncoderInput<'a> {
+    /// RGBA 4-channel data.
+    Rgba(&'a [u8]),
+    /// RGB 3-channel data.
+    Rgb(&'a [u8]),
+    /// Grayscale data.
+    L8(&'a [u8]),
+    /// Grayscale with alpha data.
+    La8(&'a [u8]),
+}
+
+/// WebP encoder with full configuration options (webpx-compatible API).
+///
+/// This is the preferred API for encoding WebP images. Use the builder pattern
+/// to configure encoding options, then call [`encode()`](Encoder::encode) to
+/// encode the image.
+///
+/// # Example
+///
+/// ```rust
+/// use zenwebp::{Encoder, Preset};
+///
+/// let rgba: &[u8] = &[0u8; 640 * 480 * 4]; // placeholder
+/// let webp = Encoder::new_rgba(rgba, 640, 480)
+///     .preset(Preset::Photo)
+///     .quality(85.0)
+///     .encode()?;
+/// # Ok::<(), zenwebp::EncodingError>(())
+/// ```
+pub struct Encoder<'a> {
+    data: EncoderInput<'a>,
+    width: u32,
+    height: u32,
+    config: EncoderConfig,
+    icc_profile: Option<Vec<u8>>,
+    exif_metadata: Option<Vec<u8>>,
+    xmp_metadata: Option<Vec<u8>>,
+}
+
+impl<'a> Encoder<'a> {
+    /// Create a new encoder for contiguous RGBA data.
+    #[must_use]
+    pub fn new_rgba(data: &'a [u8], width: u32, height: u32) -> Self {
+        Self {
+            data: EncoderInput::Rgba(data),
+            width,
+            height,
+            config: EncoderConfig::default(),
+            icc_profile: None,
+            exif_metadata: None,
+            xmp_metadata: None,
+        }
+    }
+
+    /// Create a new encoder for contiguous RGB data (no alpha).
+    #[must_use]
+    pub fn new_rgb(data: &'a [u8], width: u32, height: u32) -> Self {
+        Self {
+            data: EncoderInput::Rgb(data),
+            width,
+            height,
+            config: EncoderConfig::default(),
+            icc_profile: None,
+            exif_metadata: None,
+            xmp_metadata: None,
+        }
+    }
+
+    /// Create a new encoder for grayscale data.
+    #[must_use]
+    pub fn new_l8(data: &'a [u8], width: u32, height: u32) -> Self {
+        Self {
+            data: EncoderInput::L8(data),
+            width,
+            height,
+            config: EncoderConfig::default(),
+            icc_profile: None,
+            exif_metadata: None,
+            xmp_metadata: None,
+        }
+    }
+
+    /// Create a new encoder for grayscale with alpha data.
+    #[must_use]
+    pub fn new_la8(data: &'a [u8], width: u32, height: u32) -> Self {
+        Self {
+            data: EncoderInput::La8(data),
+            width,
+            height,
+            config: EncoderConfig::default(),
+            icc_profile: None,
+            exif_metadata: None,
+            xmp_metadata: None,
+        }
+    }
+
+    /// Set encoding quality (0.0 = smallest, 100.0 = best).
+    #[must_use]
+    pub fn quality(mut self, quality: f32) -> Self {
+        self.config = self.config.quality(quality);
+        self
+    }
+
+    /// Set content-aware preset.
+    #[must_use]
+    pub fn preset(mut self, preset: Preset) -> Self {
+        self.config = self.config.preset(preset);
+        self
+    }
+
+    /// Enable lossless compression.
+    #[must_use]
+    pub fn lossless(mut self, lossless: bool) -> Self {
+        self.config = self.config.lossless(lossless);
+        self
+    }
+
+    /// Set quality/speed tradeoff (0 = fast, 6 = slower but better).
+    #[must_use]
+    pub fn method(mut self, method: u8) -> Self {
+        self.config = self.config.method(method);
+        self
+    }
+
+    /// Set near-lossless preprocessing (0 = max, 100 = off).
+    #[must_use]
+    pub fn near_lossless(mut self, value: u8) -> Self {
+        self.config = self.config.near_lossless(value);
+        self
+    }
+
+    /// Set alpha quality (0-100).
+    #[must_use]
+    pub fn alpha_quality(mut self, quality: u8) -> Self {
+        self.config = self.config.alpha_quality(quality);
+        self
+    }
+
+    /// Preserve exact RGB values under transparent areas.
+    #[must_use]
+    pub fn exact(mut self, exact: bool) -> Self {
+        self.config = self.config.exact(exact);
+        self
+    }
+
+    /// Set target file size in bytes (0 = disabled).
+    #[must_use]
+    pub fn target_size(mut self, size: u32) -> Self {
+        self.config = self.config.target_size(size);
+        self
+    }
+
+    /// Use sharp YUV conversion (slower but better).
+    #[must_use]
+    pub fn sharp_yuv(mut self, enable: bool) -> Self {
+        self.config = self.config.sharp_yuv(enable);
+        self
+    }
+
+    /// Set full encoder configuration.
+    #[must_use]
+    pub fn config(mut self, config: EncoderConfig) -> Self {
+        self.config = config;
+        self
+    }
+
+    /// Set ICC profile to embed.
+    #[must_use]
+    pub fn icc_profile(mut self, profile: Vec<u8>) -> Self {
+        self.icc_profile = Some(profile);
+        self
+    }
+
+    /// Set EXIF metadata to embed.
+    #[must_use]
+    pub fn exif_metadata(mut self, data: Vec<u8>) -> Self {
+        self.exif_metadata = Some(data);
+        self
+    }
+
+    /// Set XMP metadata to embed.
+    #[must_use]
+    pub fn xmp_metadata(mut self, data: Vec<u8>) -> Self {
+        self.xmp_metadata = Some(data);
+        self
+    }
+
+    /// Encode to WebP bytes.
+    ///
+    /// Returns the encoded WebP data.
+    pub fn encode(self) -> Result<Vec<u8>, EncodingError> {
+        let (data, color_type) = match self.data {
+            EncoderInput::Rgba(d) => (d, ColorType::Rgba8),
+            EncoderInput::Rgb(d) => (d, ColorType::Rgb8),
+            EncoderInput::L8(d) => (d, ColorType::L8),
+            EncoderInput::La8(d) => (d, ColorType::La8),
+        };
+
+        validate_buffer_size(
+            data.len(),
+            self.width,
+            self.height,
+            color_type.bytes_per_pixel() as u32,
+        )?;
+
+        let mut output = Vec::new();
+        {
+            let mut encoder = WebPEncoder::new(&mut output);
+            encoder.set_params(self.config.to_params());
+            if let Some(icc) = self.icc_profile {
+                encoder.set_icc_profile(icc);
+            }
+            if let Some(exif) = self.exif_metadata {
+                encoder.set_exif_metadata(exif);
+            }
+            if let Some(xmp) = self.xmp_metadata {
+                encoder.set_xmp_metadata(xmp);
+            }
+            encoder.encode(data, self.width, self.height, color_type)?;
+        }
+        Ok(output)
+    }
+
+    /// Encode to WebP, appending to an existing Vec.
+    pub fn encode_into(self, output: &mut Vec<u8>) -> Result<(), EncodingError> {
+        let encoded = self.encode()?;
+        output.extend_from_slice(&encoded);
+        Ok(())
+    }
+
+    /// Encode to WebP, writing to an [`io::Write`](std::io::Write) implementor.
+    pub fn encode_to_writer<W: Write>(self, mut writer: W) -> Result<(), EncodingError> {
+        let (data, color_type) = match self.data {
+            EncoderInput::Rgba(d) => (d, ColorType::Rgba8),
+            EncoderInput::Rgb(d) => (d, ColorType::Rgb8),
+            EncoderInput::L8(d) => (d, ColorType::L8),
+            EncoderInput::La8(d) => (d, ColorType::La8),
+        };
+
+        validate_buffer_size(
+            data.len(),
+            self.width,
+            self.height,
+            color_type.bytes_per_pixel() as u32,
+        )?;
+
+        let mut encoder = WebPEncoder::new(&mut writer);
+        encoder.set_params(self.config.to_params());
+        if let Some(icc) = self.icc_profile {
+            encoder.set_icc_profile(icc);
+        }
+        if let Some(exif) = self.exif_metadata {
+            encoder.set_exif_metadata(exif);
+        }
+        if let Some(xmp) = self.xmp_metadata {
+            encoder.set_xmp_metadata(xmp);
+        }
+        encoder.encode(data, self.width, self.height, color_type)?;
+        Ok(())
+    }
+}
+
+/// Validate buffer size for encoding.
+fn validate_buffer_size(
+    size: usize,
+    width: u32,
+    height: u32,
+    bpp: u32,
+) -> Result<(), EncodingError> {
+    let expected = (width as usize)
+        .saturating_mul(height as usize)
+        .saturating_mul(bpp as usize);
+
+    if size < expected {
+        return Err(EncodingError::InvalidBufferSize(format!(
+            "buffer too small: got {}, expected {}",
+            size, expected
+        )));
+    }
+    Ok(())
+}
+
+// ============================================================================
+// Lossless encoding implementation
+// ============================================================================
 
 /// Encode image data losslessly with the indicated color type.
 ///

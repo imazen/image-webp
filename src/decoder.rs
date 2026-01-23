@@ -959,6 +959,235 @@ pub(crate) fn read_chunk_header<R: BufRead>(
     Ok((chunk, chunk_size.into(), chunk_size_rounded.into()))
 }
 
+// ============================================================================
+// Convenience decode functions (webpx-compatible API)
+// ============================================================================
+
+/// Decode WebP data to RGBA pixels.
+///
+/// Returns the decoded pixels and dimensions.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// let webp_data: &[u8] = &[]; // your WebP data
+/// let (pixels, width, height) = zenwebp::decode_rgba(webp_data)?;
+/// # Ok::<(), zenwebp::DecodingError>(())
+/// ```
+pub fn decode_rgba(data: &[u8]) -> Result<(Vec<u8>, u32, u32), DecodingError> {
+    let cursor = std::io::Cursor::new(data);
+    let mut decoder = WebPDecoder::new(cursor)?;
+    let (width, height) = decoder.dimensions();
+    let output_size = decoder
+        .output_buffer_size()
+        .ok_or(DecodingError::ImageTooLarge)?;
+
+    // Get output in native format (RGB or RGBA)
+    let mut output = vec![0u8; output_size];
+    decoder.read_image(&mut output)?;
+
+    // If the decoder outputs RGB, convert to RGBA
+    if !decoder.has_alpha() {
+        let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+        for chunk in output.chunks_exact(3) {
+            rgba.extend_from_slice(chunk);
+            rgba.push(255);
+        }
+        return Ok((rgba, width, height));
+    }
+
+    Ok((output, width, height))
+}
+
+/// Decode WebP data to RGB pixels (no alpha).
+///
+/// Returns the decoded pixels and dimensions.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// let webp_data: &[u8] = &[]; // your WebP data
+/// let (pixels, width, height) = zenwebp::decode_rgb(webp_data)?;
+/// # Ok::<(), zenwebp::DecodingError>(())
+/// ```
+pub fn decode_rgb(data: &[u8]) -> Result<(Vec<u8>, u32, u32), DecodingError> {
+    let cursor = std::io::Cursor::new(data);
+    let mut decoder = WebPDecoder::new(cursor)?;
+    let (width, height) = decoder.dimensions();
+    let output_size = decoder
+        .output_buffer_size()
+        .ok_or(DecodingError::ImageTooLarge)?;
+
+    let mut output = vec![0u8; output_size];
+    decoder.read_image(&mut output)?;
+
+    // If the decoder outputs RGBA, convert to RGB
+    if decoder.has_alpha() {
+        let mut rgb = Vec::with_capacity((width * height * 3) as usize);
+        for chunk in output.chunks_exact(4) {
+            rgb.extend_from_slice(&chunk[..3]);
+        }
+        return Ok((rgb, width, height));
+    }
+
+    Ok((output, width, height))
+}
+
+/// Decode WebP data directly into a pre-allocated RGBA buffer.
+///
+/// # Arguments
+/// * `data` - WebP encoded data
+/// * `output` - Pre-allocated output buffer (must be at least stride * height bytes)
+/// * `stride_bytes` - Row stride in bytes (must be >= width * 4)
+///
+/// # Returns
+/// Width and height of the decoded image.
+pub fn decode_rgba_into(
+    data: &[u8],
+    output: &mut [u8],
+    stride_bytes: u32,
+) -> Result<(u32, u32), DecodingError> {
+    let cursor = std::io::Cursor::new(data);
+    let mut decoder = WebPDecoder::new(cursor)?;
+    let (width, height) = decoder.dimensions();
+
+    // Validate buffer
+    let min_stride = (width as usize) * 4;
+    if (stride_bytes as usize) < min_stride {
+        return Err(DecodingError::InvalidParameter(format!(
+            "stride too small: got {}, minimum {}",
+            stride_bytes, min_stride
+        )));
+    }
+
+    let required = (stride_bytes as usize) * (height as usize);
+    if output.len() < required {
+        return Err(DecodingError::InvalidParameter(format!(
+            "output buffer too small: got {}, need {}",
+            output.len(),
+            required
+        )));
+    }
+
+    // Decode into temporary buffer
+    let output_size = decoder
+        .output_buffer_size()
+        .ok_or(DecodingError::ImageTooLarge)?;
+    let mut temp = vec![0u8; output_size];
+    decoder.read_image(&mut temp)?;
+
+    // Copy to output with stride
+    let has_alpha = decoder.has_alpha();
+    let src_bpp = if has_alpha { 4 } else { 3 };
+
+    for y in 0..(height as usize) {
+        let dst_row = &mut output[y * (stride_bytes as usize)..][..width as usize * 4];
+        let src_row = &temp[y * (width as usize) * src_bpp..][..width as usize * src_bpp];
+
+        if has_alpha {
+            dst_row.copy_from_slice(src_row);
+        } else {
+            for (dst, src) in dst_row.chunks_exact_mut(4).zip(src_row.chunks_exact(3)) {
+                dst[..3].copy_from_slice(src);
+                dst[3] = 255;
+            }
+        }
+    }
+
+    Ok((width, height))
+}
+
+/// Decode WebP data directly into a pre-allocated RGB buffer.
+///
+/// # Arguments
+/// * `data` - WebP encoded data
+/// * `output` - Pre-allocated output buffer (must be at least stride * height bytes)
+/// * `stride_bytes` - Row stride in bytes (must be >= width * 3)
+///
+/// # Returns
+/// Width and height of the decoded image.
+pub fn decode_rgb_into(
+    data: &[u8],
+    output: &mut [u8],
+    stride_bytes: u32,
+) -> Result<(u32, u32), DecodingError> {
+    let cursor = std::io::Cursor::new(data);
+    let mut decoder = WebPDecoder::new(cursor)?;
+    let (width, height) = decoder.dimensions();
+
+    // Validate buffer
+    let min_stride = (width as usize) * 3;
+    if (stride_bytes as usize) < min_stride {
+        return Err(DecodingError::InvalidParameter(format!(
+            "stride too small: got {}, minimum {}",
+            stride_bytes, min_stride
+        )));
+    }
+
+    let required = (stride_bytes as usize) * (height as usize);
+    if output.len() < required {
+        return Err(DecodingError::InvalidParameter(format!(
+            "output buffer too small: got {}, need {}",
+            output.len(),
+            required
+        )));
+    }
+
+    // Decode into temporary buffer
+    let output_size = decoder
+        .output_buffer_size()
+        .ok_or(DecodingError::ImageTooLarge)?;
+    let mut temp = vec![0u8; output_size];
+    decoder.read_image(&mut temp)?;
+
+    // Copy to output with stride
+    let has_alpha = decoder.has_alpha();
+    let src_bpp = if has_alpha { 4 } else { 3 };
+
+    for y in 0..(height as usize) {
+        let dst_row = &mut output[y * (stride_bytes as usize)..][..width as usize * 3];
+        let src_row = &temp[y * (width as usize) * src_bpp..][..width as usize * src_bpp];
+
+        if has_alpha {
+            for (dst, src) in dst_row.chunks_exact_mut(3).zip(src_row.chunks_exact(4)) {
+                dst.copy_from_slice(&src[..3]);
+            }
+        } else {
+            dst_row.copy_from_slice(src_row);
+        }
+    }
+
+    Ok((width, height))
+}
+
+/// Image information obtained from WebP data header.
+#[derive(Debug, Clone)]
+pub struct ImageInfo {
+    /// Image width in pixels.
+    pub width: u32,
+    /// Image height in pixels.
+    pub height: u32,
+    /// Whether the image has an alpha channel.
+    pub has_alpha: bool,
+    /// Whether the image uses lossy compression.
+    pub is_lossy: bool,
+}
+
+impl ImageInfo {
+    /// Parse image information from WebP data.
+    pub fn from_webp(data: &[u8]) -> Result<Self, DecodingError> {
+        let cursor = std::io::Cursor::new(data);
+        let mut decoder = WebPDecoder::new(cursor)?;
+        let (width, height) = decoder.dimensions();
+        Ok(Self {
+            width,
+            height,
+            has_alpha: decoder.has_alpha(),
+            is_lossy: decoder.is_lossy(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
