@@ -1,400 +1,377 @@
-//! SIMD-optimized YUV to RGB conversion using x86 SSE4.1 intrinsics.
+//! SIMD-optimized YUV to RGB conversion using x86 SSE2/SSE4.1 intrinsics.
 //!
-//! Processes 8 pixels at a time for significant speedup over scalar code.
-//! Uses the same formula as libwebp's yuv.h to ensure bit-exact output.
+//! Ported from libwebp's yuv_sse2.c for efficient 16-bit arithmetic.
+//! Processes 32 pixels at a time with SIMD RGB interleaving.
 
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::*;
 
-/// YUV to RGB conversion constants matching libwebp's yuv.h.
-///
-/// The scalar code uses:
-///   R = clip((mulhi(y, 19077) + mulhi(v, 26149) - 14234) >> 6)
-///   G = clip((mulhi(y, 19077) - mulhi(u, 6419) - mulhi(v, 13320) + 8708) >> 6)
-///   B = clip((mulhi(y, 19077) + mulhi(u, 33050) - 17685) >> 6)
-/// where mulhi(x, c) = (x * c) >> 8
-///
-/// We combine to: result = (y * Y_COEFF + u * U_COEFF + v * V_COEFF + OFFSET) >> 14
-/// So coefficients are shifted left by 6 (multiply by 64).
-const Y_COEFF: i32 = 19077;
-const V_R_COEFF: i32 = 26149;
-const U_G_COEFF: i32 = 6419;
-const V_G_COEFF: i32 = 13320;
-const U_B_COEFF: i32 = 33050;
-const R_OFFSET: i32 = -14234;
-const G_OFFSET: i32 = 8708;
-const B_OFFSET: i32 = -17685;
+// YUV to RGB conversion constants (14-bit fixed-point, matching libwebp).
+// R = (19077 * y             + 26149 * v - 14234) >> 6
+// G = (19077 * y -  6419 * u - 13320 * v +  8708) >> 6
+// B = (19077 * y + 33050 * u             - 17685) >> 6
 
-// For SIMD: we need to do mulhi then the final shift, so just use these directly
-// Final: ((y * 19077) >> 8) + ((v * 26149) >> 8) - 14234, then >> 6
+/// Load 8 bytes into the upper 8 bits of 16-bit words (equivalent to << 8).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+#[inline]
+unsafe fn load_hi_16(src: *const u8) -> __m128i {
+    let zero = _mm_setzero_si128();
+    let data = _mm_loadl_epi64(src as *const __m128i);
+    _mm_unpacklo_epi8(zero, data)
+}
 
-/// Process 8 pixels of YUV to RGB conversion (1:1 Y:U:V mapping).
-///
-/// Uses the same formula as the scalar code for bit-exact results.
+/// Load 4 U/V bytes and replicate each to get 8 values for 4:2:0.
+/// Result: [u0,u0,u1,u1,u2,u2,u3,u3] in upper 8 bits of 16-bit words.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+#[inline]
+unsafe fn load_uv_hi_8(src: *const u8) -> __m128i {
+    let zero = _mm_setzero_si128();
+    // Load 4 bytes
+    let tmp0 = _mm_cvtsi32_si128(core::ptr::read_unaligned(src as *const i32));
+    // Unpack to 16-bit with zeros in low bytes: [0,u0,0,u1,0,u2,0,u3,...]
+    let tmp1 = _mm_unpacklo_epi8(zero, tmp0);
+    // Replicate: [0,u0,0,u0,0,u1,0,u1,...]
+    _mm_unpacklo_epi16(tmp1, tmp1)
+}
+
+/// Convert 8 YUV444 pixels to R, G, B (16-bit results).
+/// Input Y, U, V are in upper 8 bits of 16-bit words.
+/// Output R, G, B are signed 16-bit values (will be clamped later).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+#[inline]
+unsafe fn convert_yuv444_to_rgb(y: __m128i, u: __m128i, v: __m128i) -> (__m128i, __m128i, __m128i) {
+    let k19077 = _mm_set1_epi16(19077);
+    let k26149 = _mm_set1_epi16(26149);
+    let k14234 = _mm_set1_epi16(14234);
+    // 33050 doesn't fit in signed i16, use unsigned arithmetic
+    let k33050 = _mm_set1_epi16(33050u16 as i16);
+    let k17685 = _mm_set1_epi16(17685);
+    let k6419 = _mm_set1_epi16(6419);
+    let k13320 = _mm_set1_epi16(13320);
+    let k8708 = _mm_set1_epi16(8708);
+
+    // Y contribution (same for all channels)
+    let y1 = _mm_mulhi_epu16(y, k19077);
+
+    // R = Y1 + V*26149 - 14234
+    let r0 = _mm_mulhi_epu16(v, k26149);
+    let r1 = _mm_sub_epi16(y1, k14234);
+    let r2 = _mm_add_epi16(r1, r0);
+
+    // G = Y1 - U*6419 - V*13320 + 8708
+    let g0 = _mm_mulhi_epu16(u, k6419);
+    let g1 = _mm_mulhi_epu16(v, k13320);
+    let g2 = _mm_add_epi16(y1, k8708);
+    let g3 = _mm_add_epi16(g0, g1);
+    let g4 = _mm_sub_epi16(g2, g3);
+
+    // B = Y1 + U*33050 - 17685 (careful with unsigned arithmetic)
+    let b0 = _mm_mulhi_epu16(u, k33050);
+    let b1 = _mm_adds_epu16(b0, y1);
+    let b2 = _mm_subs_epu16(b1, k17685);
+
+    // Final shift by 6
+    // R and G can be negative, use arithmetic shift
+    // B is always positive (due to unsigned ops), use logical shift
+    let r = _mm_srai_epi16(r2, 6);
+    let g = _mm_srai_epi16(g4, 6);
+    let b = _mm_srli_epi16(b2, 6);
+
+    (r, g, b)
+}
+
+/// Pack R, G, B, A (8 pixels each, 16-bit) into 32 bytes of RGBA output.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+#[inline]
+#[allow(dead_code)]
+unsafe fn pack_and_store_rgba(r: __m128i, g: __m128i, b: __m128i, a: __m128i, dst: *mut u8) {
+    let rb = _mm_packus_epi16(r, b);
+    let ga = _mm_packus_epi16(g, a);
+    let rg = _mm_unpacklo_epi8(rb, ga);
+    let ba = _mm_unpackhi_epi8(rb, ga);
+    let rgba_lo = _mm_unpacklo_epi16(rg, ba);
+    let rgba_hi = _mm_unpackhi_epi16(rg, ba);
+    _mm_storeu_si128(dst as *mut __m128i, rgba_lo);
+    _mm_storeu_si128(dst.add(16) as *mut __m128i, rgba_hi);
+}
+
+/// Helper macro for VP8PlanarTo24b - splits even/odd bytes
+macro_rules! planar_to_24b_helper {
+    ($in0:expr, $in1:expr, $in2:expr, $in3:expr, $in4:expr, $in5:expr,
+     $out0:expr, $out1:expr, $out2:expr, $out3:expr, $out4:expr, $out5:expr) => {
+        let v_mask = _mm_set1_epi16(0x00ff);
+        // Take even bytes (lower 8 bits of each 16-bit word)
+        $out0 = _mm_packus_epi16(_mm_and_si128($in0, v_mask), _mm_and_si128($in1, v_mask));
+        $out1 = _mm_packus_epi16(_mm_and_si128($in2, v_mask), _mm_and_si128($in3, v_mask));
+        $out2 = _mm_packus_epi16(_mm_and_si128($in4, v_mask), _mm_and_si128($in5, v_mask));
+        // Take odd bytes (upper 8 bits of each 16-bit word)
+        $out3 = _mm_packus_epi16(_mm_srli_epi16($in0, 8), _mm_srli_epi16($in1, 8));
+        $out4 = _mm_packus_epi16(_mm_srli_epi16($in2, 8), _mm_srli_epi16($in3, 8));
+        $out5 = _mm_packus_epi16(_mm_srli_epi16($in4, 8), _mm_srli_epi16($in5, 8));
+    };
+}
+
+/// Convert planar RRRR...GGGG...BBBB... to interleaved RGBRGBRGB...
+/// Input: 6 registers (R0, R1, G0, G1, B0, B1) with 16 bytes each = 32 R, 32 G, 32 B
+/// Output: 6 registers with 96 bytes of interleaved RGB
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+#[inline]
+unsafe fn planar_to_24b(
+    in0: __m128i,
+    in1: __m128i,
+    in2: __m128i,
+    in3: __m128i,
+    in4: __m128i,
+    in5: __m128i,
+) -> (__m128i, __m128i, __m128i, __m128i, __m128i, __m128i) {
+    // 5 passes of the permutation to convert:
+    // Input: r0r1r2r3... | r16r17... | g0g1g2g3... | g16g17... | b0b1b2b3... | b16b17...
+    // Output: r0g0b0r1g1b1... (interleaved RGB)
+
+    let (mut t0, mut t1, mut t2, mut t3, mut t4, mut t5);
+    let (mut o0, mut o1, mut o2, mut o3, mut o4, mut o5);
+
+    // Pass 1
+    planar_to_24b_helper!(in0, in1, in2, in3, in4, in5, t0, t1, t2, t3, t4, t5);
+    // Pass 2
+    planar_to_24b_helper!(t0, t1, t2, t3, t4, t5, o0, o1, o2, o3, o4, o5);
+    // Pass 3
+    planar_to_24b_helper!(o0, o1, o2, o3, o4, o5, t0, t1, t2, t3, t4, t5);
+    // Pass 4
+    planar_to_24b_helper!(t0, t1, t2, t3, t4, t5, o0, o1, o2, o3, o4, o5);
+    // Pass 5
+    planar_to_24b_helper!(o0, o1, o2, o3, o4, o5, t0, t1, t2, t3, t4, t5);
+
+    (t0, t1, t2, t3, t4, t5)
+}
+
+/// Convert 32 YUV444 pixels to 96 bytes of RGB.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+#[allow(dead_code)]
+unsafe fn yuv444_to_rgb_32(y: *const u8, u: *const u8, v: *const u8, dst: *mut u8) {
+    // Process 4 groups of 8 pixels
+    let y0 = load_hi_16(y);
+    let u0 = load_hi_16(u);
+    let v0 = load_hi_16(v);
+    let (r0, g0, b0) = convert_yuv444_to_rgb(y0, u0, v0);
+
+    let y1 = load_hi_16(y.add(8));
+    let u1 = load_hi_16(u.add(8));
+    let v1 = load_hi_16(v.add(8));
+    let (r1, g1, b1) = convert_yuv444_to_rgb(y1, u1, v1);
+
+    let y2 = load_hi_16(y.add(16));
+    let u2 = load_hi_16(u.add(16));
+    let v2 = load_hi_16(v.add(16));
+    let (r2, g2, b2) = convert_yuv444_to_rgb(y2, u2, v2);
+
+    let y3 = load_hi_16(y.add(24));
+    let u3 = load_hi_16(u.add(24));
+    let v3 = load_hi_16(v.add(24));
+    let (r3, g3, b3) = convert_yuv444_to_rgb(y3, u3, v3);
+
+    // Pack to 8-bit and arrange as RRRRGGGGBBBB
+    let rgb0 = _mm_packus_epi16(r0, r1); // R0-R15
+    let rgb1 = _mm_packus_epi16(r2, r3); // R16-R31
+    let rgb2 = _mm_packus_epi16(g0, g1); // G0-G15
+    let rgb3 = _mm_packus_epi16(g2, g3); // G16-G31
+    let rgb4 = _mm_packus_epi16(b0, b1); // B0-B15
+    let rgb5 = _mm_packus_epi16(b2, b3); // B16-B31
+
+    // Interleave to RGBRGBRGB...
+    let (out0, out1, out2, out3, out4, out5) = planar_to_24b(rgb0, rgb1, rgb2, rgb3, rgb4, rgb5);
+
+    // Store 96 bytes
+    _mm_storeu_si128(dst as *mut __m128i, out0);
+    _mm_storeu_si128(dst.add(16) as *mut __m128i, out1);
+    _mm_storeu_si128(dst.add(32) as *mut __m128i, out2);
+    _mm_storeu_si128(dst.add(48) as *mut __m128i, out3);
+    _mm_storeu_si128(dst.add(64) as *mut __m128i, out4);
+    _mm_storeu_si128(dst.add(80) as *mut __m128i, out5);
+}
+
+/// Convert 32 YUV420 pixels (32 Y, 16 U, 16 V) to 96 bytes of RGB.
+/// Each U/V value is replicated for 2 adjacent Y pixels.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn yuv420_to_rgb_32(y: *const u8, u: *const u8, v: *const u8, dst: *mut u8) {
+    // Process 4 groups of 8 pixels, with U/V replication
+    let y0 = load_hi_16(y);
+    let u0 = load_uv_hi_8(u);
+    let v0 = load_uv_hi_8(v);
+    let (r0, g0, b0) = convert_yuv444_to_rgb(y0, u0, v0);
+
+    let y1 = load_hi_16(y.add(8));
+    let u1 = load_uv_hi_8(u.add(4));
+    let v1 = load_uv_hi_8(v.add(4));
+    let (r1, g1, b1) = convert_yuv444_to_rgb(y1, u1, v1);
+
+    let y2 = load_hi_16(y.add(16));
+    let u2 = load_uv_hi_8(u.add(8));
+    let v2 = load_uv_hi_8(v.add(8));
+    let (r2, g2, b2) = convert_yuv444_to_rgb(y2, u2, v2);
+
+    let y3 = load_hi_16(y.add(24));
+    let u3 = load_uv_hi_8(u.add(12));
+    let v3 = load_uv_hi_8(v.add(12));
+    let (r3, g3, b3) = convert_yuv444_to_rgb(y3, u3, v3);
+
+    // Pack to 8-bit and arrange as RRRRGGGGBBBB
+    let rgb0 = _mm_packus_epi16(r0, r1);
+    let rgb1 = _mm_packus_epi16(r2, r3);
+    let rgb2 = _mm_packus_epi16(g0, g1);
+    let rgb3 = _mm_packus_epi16(g2, g3);
+    let rgb4 = _mm_packus_epi16(b0, b1);
+    let rgb5 = _mm_packus_epi16(b2, b3);
+
+    // Interleave to RGBRGBRGB...
+    let (out0, out1, out2, out3, out4, out5) = planar_to_24b(rgb0, rgb1, rgb2, rgb3, rgb4, rgb5);
+
+    // Store 96 bytes
+    _mm_storeu_si128(dst as *mut __m128i, out0);
+    _mm_storeu_si128(dst.add(16) as *mut __m128i, out1);
+    _mm_storeu_si128(dst.add(32) as *mut __m128i, out2);
+    _mm_storeu_si128(dst.add(48) as *mut __m128i, out3);
+    _mm_storeu_si128(dst.add(64) as *mut __m128i, out4);
+    _mm_storeu_si128(dst.add(80) as *mut __m128i, out5);
+}
+
+/// Scalar fallback for YUV to RGB conversion (single pixel).
+#[inline]
+fn yuv_to_rgb_scalar(y: u8, u: u8, v: u8) -> (u8, u8, u8) {
+    fn mulhi(val: u8, coeff: u16) -> i32 {
+        ((u32::from(val) * u32::from(coeff)) >> 8) as i32
+    }
+    fn clip(v: i32) -> u8 {
+        (v >> 6).clamp(0, 255) as u8
+    }
+    let r = clip(mulhi(y, 19077) + mulhi(v, 26149) - 14234);
+    let g = clip(mulhi(y, 19077) - mulhi(u, 6419) - mulhi(v, 13320) + 8708);
+    let b = clip(mulhi(y, 19077) + mulhi(u, 33050) - 17685);
+    (r, g, b)
+}
+
+/// Convert a row of YUV420 to RGB using SIMD.
+/// Processes 32 pixels at a time, with scalar fallback for remainder.
 ///
 /// # Safety
-/// Requires SSE4.1. Input slices must have at least 8 elements.
-/// Output slice must have at least 24 bytes (8 RGB pixels).
+/// Requires SSE2. y must have `len` elements, u/v must have `len/2` elements.
+/// dst must have `len * 3` bytes.
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse4.1")]
-#[allow(dead_code)]
-pub unsafe fn yuv_to_rgb_8x(y: &[u8], u: &[u8], v: &[u8], rgb: &mut [u8]) {
-    debug_assert!(y.len() >= 8);
-    debug_assert!(u.len() >= 8);
-    debug_assert!(v.len() >= 8);
-    debug_assert!(rgb.len() >= 24);
+#[target_feature(enable = "sse2")]
+pub unsafe fn yuv420_to_rgb_row(y: &[u8], u: &[u8], v: &[u8], dst: &mut [u8]) {
+    let len = y.len();
+    debug_assert!(u.len() >= (len + 1) / 2);
+    debug_assert!(v.len() >= (len + 1) / 2);
+    debug_assert!(dst.len() >= len * 3);
 
-    // Load 8 Y values and zero-extend to 32-bit
-    let y8 = _mm_loadl_epi64(y.as_ptr() as *const __m128i);
-    let y16 = _mm_unpacklo_epi8(y8, _mm_setzero_si128());
-    let y_lo = _mm_unpacklo_epi16(y16, _mm_setzero_si128());
-    let y_hi = _mm_unpackhi_epi16(y16, _mm_setzero_si128());
+    let mut n = 0usize;
+    let mut y_ptr = y.as_ptr();
+    let mut u_ptr = u.as_ptr();
+    let mut v_ptr = v.as_ptr();
+    let mut dst_ptr = dst.as_mut_ptr();
 
-    // Load 8 U values and zero-extend to 32-bit
-    let u8_vec = _mm_loadl_epi64(u.as_ptr() as *const __m128i);
-    let u16 = _mm_unpacklo_epi8(u8_vec, _mm_setzero_si128());
-    let u_lo = _mm_unpacklo_epi16(u16, _mm_setzero_si128());
-    let u_hi = _mm_unpackhi_epi16(u16, _mm_setzero_si128());
+    // Process 32 pixels at a time
+    while n + 32 <= len {
+        yuv420_to_rgb_32(y_ptr, u_ptr, v_ptr, dst_ptr);
+        y_ptr = y_ptr.add(32);
+        u_ptr = u_ptr.add(16);
+        v_ptr = v_ptr.add(16);
+        dst_ptr = dst_ptr.add(96);
+        n += 32;
+    }
 
-    // Load 8 V values and zero-extend to 32-bit
-    let v8 = _mm_loadl_epi64(v.as_ptr() as *const __m128i);
-    let v16 = _mm_unpacklo_epi8(v8, _mm_setzero_si128());
-    let v_lo = _mm_unpacklo_epi16(v16, _mm_setzero_si128());
-    let v_hi = _mm_unpackhi_epi16(v16, _mm_setzero_si128());
-
-    // Coefficients
-    let c_y = _mm_set1_epi32(Y_COEFF);
-    let c_vr = _mm_set1_epi32(V_R_COEFF);
-    let c_ug = _mm_set1_epi32(U_G_COEFF);
-    let c_vg = _mm_set1_epi32(V_G_COEFF);
-    let c_ub = _mm_set1_epi32(U_B_COEFF);
-    let r_off = _mm_set1_epi32(R_OFFSET);
-    let g_off = _mm_set1_epi32(G_OFFSET);
-    let b_off = _mm_set1_epi32(B_OFFSET);
-
-    // Low 4 pixels - compute mulhi equivalent: (x * c) >> 8
-    let y_mul_lo = _mm_srai_epi32(_mm_mullo_epi32(y_lo, c_y), 8);
-    let v_mul_r_lo = _mm_srai_epi32(_mm_mullo_epi32(v_lo, c_vr), 8);
-    let u_mul_g_lo = _mm_srai_epi32(_mm_mullo_epi32(u_lo, c_ug), 8);
-    let v_mul_g_lo = _mm_srai_epi32(_mm_mullo_epi32(v_lo, c_vg), 8);
-    let u_mul_b_lo = _mm_srai_epi32(_mm_mullo_epi32(u_lo, c_ub), 8);
-
-    let r_lo = _mm_srai_epi32(
-        _mm_add_epi32(_mm_add_epi32(y_mul_lo, v_mul_r_lo), r_off),
-        6,
-    );
-    let g_lo = _mm_srai_epi32(
-        _mm_add_epi32(
-            _mm_sub_epi32(_mm_sub_epi32(y_mul_lo, u_mul_g_lo), v_mul_g_lo),
-            g_off,
-        ),
-        6,
-    );
-    let b_lo = _mm_srai_epi32(
-        _mm_add_epi32(_mm_add_epi32(y_mul_lo, u_mul_b_lo), b_off),
-        6,
-    );
-
-    // High 4 pixels
-    let y_mul_hi = _mm_srai_epi32(_mm_mullo_epi32(y_hi, c_y), 8);
-    let v_mul_r_hi = _mm_srai_epi32(_mm_mullo_epi32(v_hi, c_vr), 8);
-    let u_mul_g_hi = _mm_srai_epi32(_mm_mullo_epi32(u_hi, c_ug), 8);
-    let v_mul_g_hi = _mm_srai_epi32(_mm_mullo_epi32(v_hi, c_vg), 8);
-    let u_mul_b_hi = _mm_srai_epi32(_mm_mullo_epi32(u_hi, c_ub), 8);
-
-    let r_hi = _mm_srai_epi32(
-        _mm_add_epi32(_mm_add_epi32(y_mul_hi, v_mul_r_hi), r_off),
-        6,
-    );
-    let g_hi = _mm_srai_epi32(
-        _mm_add_epi32(
-            _mm_sub_epi32(_mm_sub_epi32(y_mul_hi, u_mul_g_hi), v_mul_g_hi),
-            g_off,
-        ),
-        6,
-    );
-    let b_hi = _mm_srai_epi32(
-        _mm_add_epi32(_mm_add_epi32(y_mul_hi, u_mul_b_hi), b_off),
-        6,
-    );
-
-    // Pack to bytes with saturation
-    let r16 = _mm_packs_epi32(r_lo, r_hi);
-    let g16 = _mm_packs_epi32(g_lo, g_hi);
-    let b16 = _mm_packs_epi32(b_lo, b_hi);
-
-    let r8 = _mm_packus_epi16(r16, r16);
-    let g8 = _mm_packus_epi16(g16, g16);
-    let b8 = _mm_packus_epi16(b16, b16);
-
-    // Write RGB interleaved
-    let r_bytes: [u8; 16] = core::mem::transmute(r8);
-    let g_bytes: [u8; 16] = core::mem::transmute(g8);
-    let b_bytes: [u8; 16] = core::mem::transmute(b8);
-
-    for i in 0..8 {
-        rgb[i * 3] = r_bytes[i];
-        rgb[i * 3 + 1] = g_bytes[i];
-        rgb[i * 3 + 2] = b_bytes[i];
+    // Scalar fallback for remainder
+    while n < len {
+        let y_val = *y_ptr;
+        let u_val = *u_ptr;
+        let v_val = *v_ptr;
+        let (r, g, b) = yuv_to_rgb_scalar(y_val, u_val, v_val);
+        *dst_ptr = r;
+        *dst_ptr.add(1) = g;
+        *dst_ptr.add(2) = b;
+        y_ptr = y_ptr.add(1);
+        dst_ptr = dst_ptr.add(3);
+        // U/V advance every other pixel
+        if n & 1 == 1 {
+            u_ptr = u_ptr.add(1);
+            v_ptr = v_ptr.add(1);
+        }
+        n += 1;
     }
 }
 
-/// Process 8 pixels of YUV to RGBA conversion (1:1 Y:U:V mapping).
+/// Convert a row of YUV420 to RGBA using SIMD.
 /// Alpha is set to 255.
 ///
-/// Uses the same formula as the scalar code for bit-exact results.
-///
 /// # Safety
-/// Requires SSE4.1. Input slices must have at least 8 elements.
-/// Output slice must have at least 32 bytes (8 RGBA pixels).
+/// Requires SSE2. y must have `len` elements, u/v must have `len/2` elements.
+/// dst must have `len * 4` bytes.
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse4.1")]
+#[target_feature(enable = "sse2")]
 #[allow(dead_code)]
-pub unsafe fn yuv_to_rgba_8x(y: &[u8], u: &[u8], v: &[u8], rgba: &mut [u8]) {
-    debug_assert!(y.len() >= 8);
-    debug_assert!(u.len() >= 8);
-    debug_assert!(v.len() >= 8);
-    debug_assert!(rgba.len() >= 32);
+pub unsafe fn yuv420_to_rgba_row(y: &[u8], u: &[u8], v: &[u8], dst: &mut [u8]) {
+    let len = y.len();
+    debug_assert!(u.len() >= (len + 1) / 2);
+    debug_assert!(v.len() >= (len + 1) / 2);
+    debug_assert!(dst.len() >= len * 4);
 
-    // Load and zero-extend to 32-bit
-    let y8 = _mm_loadl_epi64(y.as_ptr() as *const __m128i);
-    let y16 = _mm_unpacklo_epi8(y8, _mm_setzero_si128());
-    let y_lo = _mm_unpacklo_epi16(y16, _mm_setzero_si128());
-    let y_hi = _mm_unpackhi_epi16(y16, _mm_setzero_si128());
+    let k_alpha = _mm_set1_epi16(255);
+    let mut n = 0usize;
+    let mut y_ptr = y.as_ptr();
+    let mut u_ptr = u.as_ptr();
+    let mut v_ptr = v.as_ptr();
+    let mut dst_ptr = dst.as_mut_ptr();
 
-    let u8_vec = _mm_loadl_epi64(u.as_ptr() as *const __m128i);
-    let u16 = _mm_unpacklo_epi8(u8_vec, _mm_setzero_si128());
-    let u_lo = _mm_unpacklo_epi16(u16, _mm_setzero_si128());
-    let u_hi = _mm_unpackhi_epi16(u16, _mm_setzero_si128());
+    // Process 8 pixels at a time for RGBA
+    while n + 8 <= len {
+        let y0 = load_hi_16(y_ptr);
+        let u0 = load_uv_hi_8(u_ptr);
+        let v0 = load_uv_hi_8(v_ptr);
+        let (r, g, b) = convert_yuv444_to_rgb(y0, u0, v0);
+        pack_and_store_rgba(r, g, b, k_alpha, dst_ptr);
 
-    let v8 = _mm_loadl_epi64(v.as_ptr() as *const __m128i);
-    let v16 = _mm_unpacklo_epi8(v8, _mm_setzero_si128());
-    let v_lo = _mm_unpacklo_epi16(v16, _mm_setzero_si128());
-    let v_hi = _mm_unpackhi_epi16(v16, _mm_setzero_si128());
+        y_ptr = y_ptr.add(8);
+        u_ptr = u_ptr.add(4);
+        v_ptr = v_ptr.add(4);
+        dst_ptr = dst_ptr.add(32);
+        n += 8;
+    }
 
-    // Coefficients
-    let c_y = _mm_set1_epi32(Y_COEFF);
-    let c_vr = _mm_set1_epi32(V_R_COEFF);
-    let c_ug = _mm_set1_epi32(U_G_COEFF);
-    let c_vg = _mm_set1_epi32(V_G_COEFF);
-    let c_ub = _mm_set1_epi32(U_B_COEFF);
-    let r_off = _mm_set1_epi32(R_OFFSET);
-    let g_off = _mm_set1_epi32(G_OFFSET);
-    let b_off = _mm_set1_epi32(B_OFFSET);
-
-    // Low 4 pixels
-    let y_mul_lo = _mm_srai_epi32(_mm_mullo_epi32(y_lo, c_y), 8);
-    let v_mul_r_lo = _mm_srai_epi32(_mm_mullo_epi32(v_lo, c_vr), 8);
-    let u_mul_g_lo = _mm_srai_epi32(_mm_mullo_epi32(u_lo, c_ug), 8);
-    let v_mul_g_lo = _mm_srai_epi32(_mm_mullo_epi32(v_lo, c_vg), 8);
-    let u_mul_b_lo = _mm_srai_epi32(_mm_mullo_epi32(u_lo, c_ub), 8);
-
-    let r_lo = _mm_srai_epi32(
-        _mm_add_epi32(_mm_add_epi32(y_mul_lo, v_mul_r_lo), r_off),
-        6,
-    );
-    let g_lo = _mm_srai_epi32(
-        _mm_add_epi32(
-            _mm_sub_epi32(_mm_sub_epi32(y_mul_lo, u_mul_g_lo), v_mul_g_lo),
-            g_off,
-        ),
-        6,
-    );
-    let b_lo = _mm_srai_epi32(
-        _mm_add_epi32(_mm_add_epi32(y_mul_lo, u_mul_b_lo), b_off),
-        6,
-    );
-
-    // High 4 pixels
-    let y_mul_hi = _mm_srai_epi32(_mm_mullo_epi32(y_hi, c_y), 8);
-    let v_mul_r_hi = _mm_srai_epi32(_mm_mullo_epi32(v_hi, c_vr), 8);
-    let u_mul_g_hi = _mm_srai_epi32(_mm_mullo_epi32(u_hi, c_ug), 8);
-    let v_mul_g_hi = _mm_srai_epi32(_mm_mullo_epi32(v_hi, c_vg), 8);
-    let u_mul_b_hi = _mm_srai_epi32(_mm_mullo_epi32(u_hi, c_ub), 8);
-
-    let r_hi = _mm_srai_epi32(
-        _mm_add_epi32(_mm_add_epi32(y_mul_hi, v_mul_r_hi), r_off),
-        6,
-    );
-    let g_hi = _mm_srai_epi32(
-        _mm_add_epi32(
-            _mm_sub_epi32(_mm_sub_epi32(y_mul_hi, u_mul_g_hi), v_mul_g_hi),
-            g_off,
-        ),
-        6,
-    );
-    let b_hi = _mm_srai_epi32(
-        _mm_add_epi32(_mm_add_epi32(y_mul_hi, u_mul_b_hi), b_off),
-        6,
-    );
-
-    // Pack to bytes with saturation
-    let r16 = _mm_packs_epi32(r_lo, r_hi);
-    let g16 = _mm_packs_epi32(g_lo, g_hi);
-    let b16 = _mm_packs_epi32(b_lo, b_hi);
-
-    let r8 = _mm_packus_epi16(r16, r16);
-    let g8 = _mm_packus_epi16(g16, g16);
-    let b8 = _mm_packus_epi16(b16, b16);
-
-    // Write RGBA interleaved
-    let r_bytes: [u8; 16] = core::mem::transmute(r8);
-    let g_bytes: [u8; 16] = core::mem::transmute(g8);
-    let b_bytes: [u8; 16] = core::mem::transmute(b8);
-
-    for i in 0..8 {
-        rgba[i * 4] = r_bytes[i];
-        rgba[i * 4 + 1] = g_bytes[i];
-        rgba[i * 4 + 2] = b_bytes[i];
-        rgba[i * 4 + 3] = 255;
+    // Scalar fallback for remainder
+    while n < len {
+        let y_val = *y_ptr;
+        let u_val = *u_ptr;
+        let v_val = *v_ptr;
+        let (r, g, b) = yuv_to_rgb_scalar(y_val, u_val, v_val);
+        *dst_ptr = r;
+        *dst_ptr.add(1) = g;
+        *dst_ptr.add(2) = b;
+        *dst_ptr.add(3) = 255;
+        y_ptr = y_ptr.add(1);
+        dst_ptr = dst_ptr.add(4);
+        if n & 1 == 1 {
+            u_ptr = u_ptr.add(1);
+            v_ptr = v_ptr.add(1);
+        }
+        n += 1;
     }
 }
 
-/// Process 8 pixels with 4:2:0 chroma subsampling (4 U/V pairs for 8 Y values).
-/// Each U/V pair is shared by 2 adjacent Y pixels.
+// =============================================================================
+// Fancy upsampling (bilinear interpolation of chroma)
+// =============================================================================
+
+/// Compute fancy chroma interpolation for 16 pixels using SIMD.
+/// Formula: (9*a + 3*b + 3*c + d + 8) / 16
 ///
-/// This matches the layout used by fill_rgba_row_simple and uses the exact
-/// same formula as the scalar code:
-///   R = clip((mulhi(y, 19077) + mulhi(v, 26149) - 14234) >> 6)
-///   G = clip((mulhi(y, 19077) - mulhi(u, 6419) - mulhi(v, 13320) + 8708) >> 6)
-///   B = clip((mulhi(y, 19077) + mulhi(u, 33050) - 17685) >> 6)
-/// where mulhi(x, c) = (x * c) >> 8
-///
-/// # Safety
-/// Requires SSE4.1. y must have 8 elements, u/v must have 4 elements.
-/// rgb output must have 24 bytes (8 RGB pixels).
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse4.1")]
-#[allow(dead_code)]
-pub unsafe fn yuv420_to_rgb_8x(
-    y: &[u8],
-    u: &[u8], // 4 values, each shared by 2 Y pixels
-    v: &[u8], // 4 values, each shared by 2 Y pixels
-    rgb: &mut [u8],
-) {
-    debug_assert!(y.len() >= 8);
-    debug_assert!(u.len() >= 4);
-    debug_assert!(v.len() >= 4);
-    debug_assert!(rgb.len() >= 24);
-
-    // Load 8 Y values and zero-extend to 32-bit
-    let y8 = _mm_loadl_epi64(y.as_ptr() as *const __m128i);
-    let y16 = _mm_unpacklo_epi8(y8, _mm_setzero_si128());
-    let y_lo = _mm_unpacklo_epi16(y16, _mm_setzero_si128());
-    let y_hi = _mm_unpackhi_epi16(y16, _mm_setzero_si128());
-
-    // Load 4 U values and duplicate each to get 8 values: [u0,u0,u1,u1,u2,u2,u3,u3]
-    let u4 = _mm_cvtsi32_si128(i32::from_ne_bytes([u[0], u[1], u[2], u[3]]));
-    let u8_dup = _mm_unpacklo_epi8(u4, u4);
-    let u16 = _mm_unpacklo_epi8(u8_dup, _mm_setzero_si128());
-    let u_lo = _mm_unpacklo_epi16(u16, _mm_setzero_si128());
-    let u_hi = _mm_unpackhi_epi16(u16, _mm_setzero_si128());
-
-    // Same for V
-    let v4 = _mm_cvtsi32_si128(i32::from_ne_bytes([v[0], v[1], v[2], v[3]]));
-    let v8_dup = _mm_unpacklo_epi8(v4, v4);
-    let v16 = _mm_unpacklo_epi8(v8_dup, _mm_setzero_si128());
-    let v_lo = _mm_unpacklo_epi16(v16, _mm_setzero_si128());
-    let v_hi = _mm_unpackhi_epi16(v16, _mm_setzero_si128());
-
-    // Coefficients (matching scalar mulhi which does >> 8)
-    let c_y = _mm_set1_epi32(Y_COEFF);
-    let c_vr = _mm_set1_epi32(V_R_COEFF);
-    let c_ug = _mm_set1_epi32(U_G_COEFF);
-    let c_vg = _mm_set1_epi32(V_G_COEFF);
-    let c_ub = _mm_set1_epi32(U_B_COEFF);
-    let r_off = _mm_set1_epi32(R_OFFSET);
-    let g_off = _mm_set1_epi32(G_OFFSET);
-    let b_off = _mm_set1_epi32(B_OFFSET);
-
-    // Compute Y * 19077 >> 8 for all pixels (mulhi equivalent)
-    // Actually compute: (y * coeff) >> 8 + (v * coeff) >> 8 + offset, then >> 6
-    // We can combine: ((y * coeff + v * coeff) >> 8 + offset) >> 6
-    // But to match scalar exactly: mulhi(y,c) = (y*c)>>8, then add, then >>6
-    //
-    // For exact match, we compute each mulhi separately then combine
-
-    // Low 4 pixels
-    let y_mul_lo = _mm_srai_epi32(_mm_mullo_epi32(y_lo, c_y), 8);
-    let v_mul_r_lo = _mm_srai_epi32(_mm_mullo_epi32(v_lo, c_vr), 8);
-    let u_mul_g_lo = _mm_srai_epi32(_mm_mullo_epi32(u_lo, c_ug), 8);
-    let v_mul_g_lo = _mm_srai_epi32(_mm_mullo_epi32(v_lo, c_vg), 8);
-    let u_mul_b_lo = _mm_srai_epi32(_mm_mullo_epi32(u_lo, c_ub), 8);
-
-    // R = (y_mul + v_mul_r + r_off) >> 6
-    let r_lo = _mm_srai_epi32(
-        _mm_add_epi32(_mm_add_epi32(y_mul_lo, v_mul_r_lo), r_off),
-        6,
-    );
-    // G = (y_mul - u_mul_g - v_mul_g + g_off) >> 6
-    let g_lo = _mm_srai_epi32(
-        _mm_add_epi32(
-            _mm_sub_epi32(_mm_sub_epi32(y_mul_lo, u_mul_g_lo), v_mul_g_lo),
-            g_off,
-        ),
-        6,
-    );
-    // B = (y_mul + u_mul_b + b_off) >> 6
-    let b_lo = _mm_srai_epi32(
-        _mm_add_epi32(_mm_add_epi32(y_mul_lo, u_mul_b_lo), b_off),
-        6,
-    );
-
-    // High 4 pixels
-    let y_mul_hi = _mm_srai_epi32(_mm_mullo_epi32(y_hi, c_y), 8);
-    let v_mul_r_hi = _mm_srai_epi32(_mm_mullo_epi32(v_hi, c_vr), 8);
-    let u_mul_g_hi = _mm_srai_epi32(_mm_mullo_epi32(u_hi, c_ug), 8);
-    let v_mul_g_hi = _mm_srai_epi32(_mm_mullo_epi32(v_hi, c_vg), 8);
-    let u_mul_b_hi = _mm_srai_epi32(_mm_mullo_epi32(u_hi, c_ub), 8);
-
-    let r_hi = _mm_srai_epi32(
-        _mm_add_epi32(_mm_add_epi32(y_mul_hi, v_mul_r_hi), r_off),
-        6,
-    );
-    let g_hi = _mm_srai_epi32(
-        _mm_add_epi32(
-            _mm_sub_epi32(_mm_sub_epi32(y_mul_hi, u_mul_g_hi), v_mul_g_hi),
-            g_off,
-        ),
-        6,
-    );
-    let b_hi = _mm_srai_epi32(
-        _mm_add_epi32(_mm_add_epi32(y_mul_hi, u_mul_b_hi), b_off),
-        6,
-    );
-
-    // Pack to 16-bit with signed saturation, then to 8-bit with unsigned saturation
-    let r16 = _mm_packs_epi32(r_lo, r_hi);
-    let g16 = _mm_packs_epi32(g_lo, g_hi);
-    let b16 = _mm_packs_epi32(b_lo, b_hi);
-
-    let r8 = _mm_packus_epi16(r16, r16);
-    let g8 = _mm_packus_epi16(g16, g16);
-    let b8 = _mm_packus_epi16(b16, b16);
-
-    // Write RGB interleaved
-    let r_bytes: [u8; 16] = core::mem::transmute(r8);
-    let g_bytes: [u8; 16] = core::mem::transmute(g8);
-    let b_bytes: [u8; 16] = core::mem::transmute(b8);
-
-    for i in 0..8 {
-        rgb[i * 3] = r_bytes[i];
-        rgb[i * 3 + 1] = g_bytes[i];
-        rgb[i * 3 + 2] = b_bytes[i];
-    }
-}
-
-/// Compute fancy chroma interpolation: (9*a + 3*b + 3*c + d + 8) / 16
-/// Using libwebp's efficient approach with _mm_avg_epu8.
-///
-/// The formula is computed as:
-///   result = (a + m + 1) / 2
-///   where m = (k + t + 1) / 2 - correction
-///   where k = (a + b + c + d) / 4
-///   where s = (a + d + 1) / 2, t = (b + c + 1) / 2
-///
-/// # Safety
-/// Requires SSE2. All input registers must be valid.
+/// Uses libwebp's efficient approach with _mm_avg_epu8.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 #[inline]
@@ -413,21 +390,20 @@ unsafe fn fancy_upsample_16(
     // st = s ^ t
     let st = _mm_xor_si128(s, t);
 
-    // ad = a ^ d
+    // ad = a ^ d, bc = b ^ c
     let ad = _mm_xor_si128(a, d);
-    // bc = b ^ c
     let bc = _mm_xor_si128(b, c);
 
+    // k = (a + b + c + d) / 4 with proper rounding
     // k = (s + t + 1) / 2 - ((a^d) | (b^c) | (s^t)) & 1
-    // This computes (a + b + c + d) / 4 with proper rounding
     let t1 = _mm_or_si128(ad, bc);
     let t2 = _mm_or_si128(t1, st);
     let t3 = _mm_and_si128(t2, one);
     let t4 = _mm_avg_epu8(s, t);
     let k = _mm_sub_epi8(t4, t3);
 
+    // diag1 = (a + 3*b + 3*c + d) / 8 then (9*a + 3*b + 3*c + d) / 16 = (a + diag1 + 1) / 2
     // m1 = (k + t + 1) / 2 - (((b^c) & (s^t)) | (k^t)) & 1
-    // This computes (a + 3*b + 3*c + d) / 8
     let tmp1 = _mm_avg_epu8(k, t);
     let tmp2 = _mm_and_si128(bc, st);
     let tmp3 = _mm_xor_si128(k, t);
@@ -435,8 +411,8 @@ unsafe fn fancy_upsample_16(
     let tmp5 = _mm_and_si128(tmp4, one);
     let m1 = _mm_sub_epi8(tmp1, tmp5);
 
+    // diag2 = (3*a + b + c + 3*d) / 8 then (3*a + 9*b + c + 3*d) / 16 = (b + diag2 + 1) / 2
     // m2 = (k + s + 1) / 2 - (((a^d) & (s^t)) | (k^s)) & 1
-    // This computes (3*a + b + c + 3*d) / 8
     let tmp1 = _mm_avg_epu8(k, s);
     let tmp2 = _mm_and_si128(ad, st);
     let tmp3 = _mm_xor_si128(k, s);
@@ -444,266 +420,79 @@ unsafe fn fancy_upsample_16(
     let tmp5 = _mm_and_si128(tmp4, one);
     let m2 = _mm_sub_epi8(tmp1, tmp5);
 
-    // diag1 = (9*a + 3*b + 3*c + d + 8) / 16 = (a + m1 + 1) / 2
-    let diag1 = _mm_avg_epu8(a, m1);
-    // diag2 = (3*a + 9*b + c + 3*d + 8) / 16 = (b + m2 + 1) / 2
-    let diag2 = _mm_avg_epu8(b, m2);
+    // Final results
+    let diag1 = _mm_avg_epu8(a, m1); // (9*a + 3*b + 3*c + d + 8) / 16
+    let diag2 = _mm_avg_epu8(b, m2); // (3*a + 9*b + c + 3*d + 8) / 16
 
     (diag1, diag2)
 }
 
-/// Process a row with fancy upsampling and YUV to RGB conversion.
-/// Takes 16 Y pixels and 9 U/V pixels from two adjacent rows,
-/// producing 16 RGB pixels.
-///
-/// This handles the "top" row output where diag1 goes with a and diag2 goes with b.
-///
-/// # Safety
-/// Requires SSE4.1. y must have 16 elements, u_row1/u_row2/v_row1/v_row2 must
-/// have 9 elements each. rgb output must have 48 bytes (16 RGB pixels).
+/// Upsample 32 chroma pixels from two rows.
+/// Input: 17 pixels from each row (r1, r2)
+/// Output: 32 upsampled pixels for top row, 32 for bottom row
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse4.1")]
+#[target_feature(enable = "sse2")]
 #[allow(dead_code)]
-pub unsafe fn fancy_upsample_row_16(
-    y: &[u8],        // 16 Y pixels
-    u_row1: &[u8],   // 9 U pixels from top chroma row
-    u_row2: &[u8],   // 9 U pixels from bottom chroma row
-    v_row1: &[u8],   // 9 V pixels from top chroma row
-    v_row2: &[u8],   // 9 V pixels from bottom chroma row
-    rgb: &mut [u8],  // 48 bytes output (16 RGB pixels)
-    is_top_row: bool, // true for top output row, false for bottom
-) {
-    debug_assert!(y.len() >= 16);
-    debug_assert!(u_row1.len() >= 9);
-    debug_assert!(u_row2.len() >= 9);
-    debug_assert!(v_row1.len() >= 9);
-    debug_assert!(v_row2.len() >= 9);
-    debug_assert!(rgb.len() >= 48);
+unsafe fn upsample_32_pixels(r1: *const u8, r2: *const u8, out: *mut u8) {
+    let one = _mm_set1_epi8(1);
 
-    // Load U values from both rows
-    // We need 9 values: positions 0-8 for interpolating 16 output pixels
-    // a[i] = row1[i], b[i] = row1[i+1], c[i] = row2[i], d[i] = row2[i+1]
-    let u_a = _mm_loadu_si128(u_row1.as_ptr() as *const __m128i);
-    let u_b = _mm_loadu_si128(u_row1.as_ptr().add(1) as *const __m128i);
-    let u_c = _mm_loadu_si128(u_row2.as_ptr() as *const __m128i);
-    let u_d = _mm_loadu_si128(u_row2.as_ptr().add(1) as *const __m128i);
+    let a = _mm_loadu_si128(r1 as *const __m128i);
+    let b = _mm_loadu_si128(r1.add(1) as *const __m128i);
+    let c = _mm_loadu_si128(r2 as *const __m128i);
+    let d = _mm_loadu_si128(r2.add(1) as *const __m128i);
 
-    let v_a = _mm_loadu_si128(v_row1.as_ptr() as *const __m128i);
-    let v_b = _mm_loadu_si128(v_row1.as_ptr().add(1) as *const __m128i);
-    let v_c = _mm_loadu_si128(v_row2.as_ptr() as *const __m128i);
-    let v_d = _mm_loadu_si128(v_row2.as_ptr().add(1) as *const __m128i);
+    let s = _mm_avg_epu8(a, d);
+    let t = _mm_avg_epu8(b, c);
+    let st = _mm_xor_si128(s, t);
+    let ad = _mm_xor_si128(a, d);
+    let bc = _mm_xor_si128(b, c);
 
-    // Compute upsampled U/V
-    let (u_diag1, u_diag2) = fancy_upsample_16(u_a, u_b, u_c, u_d);
-    let (v_diag1, v_diag2) = fancy_upsample_16(v_a, v_b, v_c, v_d);
+    let t1 = _mm_or_si128(ad, bc);
+    let t2 = _mm_or_si128(t1, st);
+    let t3 = _mm_and_si128(t2, one);
+    let t4 = _mm_avg_epu8(s, t);
+    let k = _mm_sub_epi8(t4, t3);
 
-    // For the top row: output[2i] uses diag1, output[2i+1] uses diag2
-    // For the bottom row: output[2i] uses diag2, output[2i+1] uses diag1
-    let (u_even, u_odd, v_even, v_odd) = if is_top_row {
-        (u_diag1, u_diag2, v_diag1, v_diag2)
-    } else {
-        (u_diag2, u_diag1, v_diag2, v_diag1)
-    };
+    // m1 for diag1
+    let tmp1 = _mm_avg_epu8(k, t);
+    let tmp2 = _mm_and_si128(bc, st);
+    let tmp3 = _mm_xor_si128(k, t);
+    let tmp4 = _mm_or_si128(tmp2, tmp3);
+    let tmp5 = _mm_and_si128(tmp4, one);
+    let diag1 = _mm_sub_epi8(tmp1, tmp5);
 
-    // Interleave to get per-pixel U/V values:
-    // even/odd -> pixel 0, 1, 2, 3, ...
-    // u_interleaved[i] = if i%2==0 { u_even[i/2] } else { u_odd[i/2] }
-    let u_lo = _mm_unpacklo_epi8(u_even, u_odd); // u0 u1 u2 u3 u4 u5 u6 u7 ...
-    let v_lo = _mm_unpacklo_epi8(v_even, v_odd);
+    // m2 for diag2
+    let tmp1 = _mm_avg_epu8(k, s);
+    let tmp2 = _mm_and_si128(ad, st);
+    let tmp3 = _mm_xor_si128(k, s);
+    let tmp4 = _mm_or_si128(tmp2, tmp3);
+    let tmp5 = _mm_and_si128(tmp4, one);
+    let diag2 = _mm_sub_epi8(tmp1, tmp5);
 
-    // Load Y and convert first 8 pixels
-    let y8_0 = _mm_loadl_epi64(y.as_ptr() as *const __m128i);
-    let y16_0 = _mm_unpacklo_epi8(y8_0, _mm_setzero_si128());
-    let y_lo_0 = _mm_unpacklo_epi16(y16_0, _mm_setzero_si128());
-    let y_hi_0 = _mm_unpackhi_epi16(y16_0, _mm_setzero_si128());
+    // Pack alternating pixels for top row: (9a+3b+3c+d)/16, (3a+9b+c+3d)/16
+    let t_a = _mm_avg_epu8(a, diag1);
+    let t_b = _mm_avg_epu8(b, diag2);
+    let t_1 = _mm_unpacklo_epi8(t_a, t_b);
+    let t_2 = _mm_unpackhi_epi8(t_a, t_b);
+    _mm_storeu_si128(out as *mut __m128i, t_1);
+    _mm_storeu_si128(out.add(16) as *mut __m128i, t_2);
 
-    // Extract U/V for first 8 pixels
-    let u16_0 = _mm_unpacklo_epi8(u_lo, _mm_setzero_si128());
-    let u_lo_0 = _mm_unpacklo_epi16(u16_0, _mm_setzero_si128());
-    let u_hi_0 = _mm_unpackhi_epi16(u16_0, _mm_setzero_si128());
-
-    let v16_0 = _mm_unpacklo_epi8(v_lo, _mm_setzero_si128());
-    let v_lo_0 = _mm_unpacklo_epi16(v16_0, _mm_setzero_si128());
-    let v_hi_0 = _mm_unpackhi_epi16(v16_0, _mm_setzero_si128());
-
-    // Convert first 8 pixels
-    let c_y = _mm_set1_epi32(Y_COEFF);
-    let c_vr = _mm_set1_epi32(V_R_COEFF);
-    let c_ug = _mm_set1_epi32(U_G_COEFF);
-    let c_vg = _mm_set1_epi32(V_G_COEFF);
-    let c_ub = _mm_set1_epi32(U_B_COEFF);
-    let r_off = _mm_set1_epi32(R_OFFSET);
-    let g_off = _mm_set1_epi32(G_OFFSET);
-    let b_off = _mm_set1_epi32(B_OFFSET);
-
-    // First 4 pixels
-    let y_mul_0 = _mm_srai_epi32(_mm_mullo_epi32(y_lo_0, c_y), 8);
-    let v_mul_r_0 = _mm_srai_epi32(_mm_mullo_epi32(v_lo_0, c_vr), 8);
-    let u_mul_g_0 = _mm_srai_epi32(_mm_mullo_epi32(u_lo_0, c_ug), 8);
-    let v_mul_g_0 = _mm_srai_epi32(_mm_mullo_epi32(v_lo_0, c_vg), 8);
-    let u_mul_b_0 = _mm_srai_epi32(_mm_mullo_epi32(u_lo_0, c_ub), 8);
-
-    let r_0 = _mm_srai_epi32(
-        _mm_add_epi32(_mm_add_epi32(y_mul_0, v_mul_r_0), r_off),
-        6,
-    );
-    let g_0 = _mm_srai_epi32(
-        _mm_add_epi32(
-            _mm_sub_epi32(_mm_sub_epi32(y_mul_0, u_mul_g_0), v_mul_g_0),
-            g_off,
-        ),
-        6,
-    );
-    let b_0 = _mm_srai_epi32(
-        _mm_add_epi32(_mm_add_epi32(y_mul_0, u_mul_b_0), b_off),
-        6,
-    );
-
-    // Next 4 pixels
-    let y_mul_1 = _mm_srai_epi32(_mm_mullo_epi32(y_hi_0, c_y), 8);
-    let v_mul_r_1 = _mm_srai_epi32(_mm_mullo_epi32(v_hi_0, c_vr), 8);
-    let u_mul_g_1 = _mm_srai_epi32(_mm_mullo_epi32(u_hi_0, c_ug), 8);
-    let v_mul_g_1 = _mm_srai_epi32(_mm_mullo_epi32(v_hi_0, c_vg), 8);
-    let u_mul_b_1 = _mm_srai_epi32(_mm_mullo_epi32(u_hi_0, c_ub), 8);
-
-    let r_1 = _mm_srai_epi32(
-        _mm_add_epi32(_mm_add_epi32(y_mul_1, v_mul_r_1), r_off),
-        6,
-    );
-    let g_1 = _mm_srai_epi32(
-        _mm_add_epi32(
-            _mm_sub_epi32(_mm_sub_epi32(y_mul_1, u_mul_g_1), v_mul_g_1),
-            g_off,
-        ),
-        6,
-    );
-    let b_1 = _mm_srai_epi32(
-        _mm_add_epi32(_mm_add_epi32(y_mul_1, u_mul_b_1), b_off),
-        6,
-    );
-
-    // Pack first 8 pixels
-    let r16_0 = _mm_packs_epi32(r_0, r_1);
-    let g16_0 = _mm_packs_epi32(g_0, g_1);
-    let b16_0 = _mm_packs_epi32(b_0, b_1);
-
-    let r8_0 = _mm_packus_epi16(r16_0, r16_0);
-    let g8_0 = _mm_packus_epi16(g16_0, g16_0);
-    let b8_0 = _mm_packus_epi16(b16_0, b16_0);
-
-    // Write first 8 pixels
-    let r_bytes: [u8; 16] = core::mem::transmute(r8_0);
-    let g_bytes: [u8; 16] = core::mem::transmute(g8_0);
-    let b_bytes: [u8; 16] = core::mem::transmute(b8_0);
-
-    for i in 0..8 {
-        rgb[i * 3] = r_bytes[i];
-        rgb[i * 3 + 1] = g_bytes[i];
-        rgb[i * 3 + 2] = b_bytes[i];
-    }
-
-    // Now process pixels 8-15
-    let u_hi = _mm_unpackhi_epi8(u_even, u_odd);
-    let v_hi = _mm_unpackhi_epi8(v_even, v_odd);
-
-    let y8_1 = _mm_loadl_epi64(y.as_ptr().add(8) as *const __m128i);
-    let y16_1 = _mm_unpacklo_epi8(y8_1, _mm_setzero_si128());
-    let y_lo_1 = _mm_unpacklo_epi16(y16_1, _mm_setzero_si128());
-    let y_hi_1 = _mm_unpackhi_epi16(y16_1, _mm_setzero_si128());
-
-    let u16_1 = _mm_unpacklo_epi8(u_hi, _mm_setzero_si128());
-    let u_lo_1 = _mm_unpacklo_epi16(u16_1, _mm_setzero_si128());
-    let u_hi_1 = _mm_unpackhi_epi16(u16_1, _mm_setzero_si128());
-
-    let v16_1 = _mm_unpacklo_epi8(v_hi, _mm_setzero_si128());
-    let v_lo_1 = _mm_unpacklo_epi16(v16_1, _mm_setzero_si128());
-    let v_hi_1 = _mm_unpackhi_epi16(v16_1, _mm_setzero_si128());
-
-    // Convert pixels 8-11
-    let y_mul_2 = _mm_srai_epi32(_mm_mullo_epi32(y_lo_1, c_y), 8);
-    let v_mul_r_2 = _mm_srai_epi32(_mm_mullo_epi32(v_lo_1, c_vr), 8);
-    let u_mul_g_2 = _mm_srai_epi32(_mm_mullo_epi32(u_lo_1, c_ug), 8);
-    let v_mul_g_2 = _mm_srai_epi32(_mm_mullo_epi32(v_lo_1, c_vg), 8);
-    let u_mul_b_2 = _mm_srai_epi32(_mm_mullo_epi32(u_lo_1, c_ub), 8);
-
-    let r_2 = _mm_srai_epi32(
-        _mm_add_epi32(_mm_add_epi32(y_mul_2, v_mul_r_2), r_off),
-        6,
-    );
-    let g_2 = _mm_srai_epi32(
-        _mm_add_epi32(
-            _mm_sub_epi32(_mm_sub_epi32(y_mul_2, u_mul_g_2), v_mul_g_2),
-            g_off,
-        ),
-        6,
-    );
-    let b_2 = _mm_srai_epi32(
-        _mm_add_epi32(_mm_add_epi32(y_mul_2, u_mul_b_2), b_off),
-        6,
-    );
-
-    // Convert pixels 12-15
-    let y_mul_3 = _mm_srai_epi32(_mm_mullo_epi32(y_hi_1, c_y), 8);
-    let v_mul_r_3 = _mm_srai_epi32(_mm_mullo_epi32(v_hi_1, c_vr), 8);
-    let u_mul_g_3 = _mm_srai_epi32(_mm_mullo_epi32(u_hi_1, c_ug), 8);
-    let v_mul_g_3 = _mm_srai_epi32(_mm_mullo_epi32(v_hi_1, c_vg), 8);
-    let u_mul_b_3 = _mm_srai_epi32(_mm_mullo_epi32(u_hi_1, c_ub), 8);
-
-    let r_3 = _mm_srai_epi32(
-        _mm_add_epi32(_mm_add_epi32(y_mul_3, v_mul_r_3), r_off),
-        6,
-    );
-    let g_3 = _mm_srai_epi32(
-        _mm_add_epi32(
-            _mm_sub_epi32(_mm_sub_epi32(y_mul_3, u_mul_g_3), v_mul_g_3),
-            g_off,
-        ),
-        6,
-    );
-    let b_3 = _mm_srai_epi32(
-        _mm_add_epi32(_mm_add_epi32(y_mul_3, u_mul_b_3), b_off),
-        6,
-    );
-
-    // Pack pixels 8-15
-    let r16_1 = _mm_packs_epi32(r_2, r_3);
-    let g16_1 = _mm_packs_epi32(g_2, g_3);
-    let b16_1 = _mm_packs_epi32(b_2, b_3);
-
-    let r8_1 = _mm_packus_epi16(r16_1, r16_1);
-    let g8_1 = _mm_packus_epi16(g16_1, g16_1);
-    let b8_1 = _mm_packus_epi16(b16_1, b16_1);
-
-    // Write pixels 8-15
-    let r_bytes: [u8; 16] = core::mem::transmute(r8_1);
-    let g_bytes: [u8; 16] = core::mem::transmute(g8_1);
-    let b_bytes: [u8; 16] = core::mem::transmute(b8_1);
-
-    for i in 0..8 {
-        rgb[24 + i * 3] = r_bytes[i];
-        rgb[24 + i * 3 + 1] = g_bytes[i];
-        rgb[24 + i * 3 + 2] = b_bytes[i];
-    }
+    // Pack for bottom row: roles of diag1/diag2 swapped
+    let b_a = _mm_avg_epu8(c, diag2);
+    let b_b = _mm_avg_epu8(d, diag1);
+    let b_1 = _mm_unpacklo_epi8(b_a, b_b);
+    let b_2 = _mm_unpackhi_epi8(b_a, b_b);
+    _mm_storeu_si128(out.add(64) as *mut __m128i, b_1);
+    _mm_storeu_si128(out.add(80) as *mut __m128i, b_2);
 }
 
-/// Process 8 pixel pairs (16 Y pixels) with fancy upsampling and YUV->RGB conversion.
-///
-/// This matches the structure of `fill_row_fancy_with_2_uv_rows` but processes
-/// 16 pixels at a time using SIMD.
-///
-/// # Arguments
-/// * `y_row` - 16 Y values (positions 1..17 of the row, skipping the first edge pixel)
-/// * `u_row_1` - 9 U values from top chroma row (positions 0..9)
-/// * `u_row_2` - 9 U values from bottom chroma row (positions 0..9)
-/// * `v_row_1` - 9 V values from top chroma row
-/// * `v_row_2` - 9 V values from bottom chroma row
-/// * `rgb` - Output buffer for 16 RGB pixels (48 bytes)
+/// Process 8 pixel pairs with fancy upsampling and YUV->RGB conversion.
+/// This is the main entry point for fancy upsampling used by yuv.rs.
 ///
 /// # Safety
-/// Requires SSE4.1. All input slices must have the required minimum lengths.
+/// Requires SSE2. All input slices must have the required minimum lengths.
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse4.1")]
-#[allow(dead_code)]
+#[target_feature(enable = "sse2")]
 pub unsafe fn fancy_upsample_8_pairs(
     y_row: &[u8],     // 16 Y values
     u_row_1: &[u8],   // 9 U values from top chroma row
@@ -719,234 +508,111 @@ pub unsafe fn fancy_upsample_8_pairs(
     debug_assert!(v_row_2.len() >= 9);
     debug_assert!(rgb.len() >= 48);
 
-    // Load 8 chroma values from each row (we'll use windows of 2)
-    // For pixel pair i, we need u_row[i], u_row[i+1] from both rows
-    let u_a = _mm_loadl_epi64(u_row_1.as_ptr() as *const __m128i); // u[0..7]
-    let u_b = _mm_loadl_epi64(u_row_1.as_ptr().add(1) as *const __m128i); // u[1..8]
-    let u_c = _mm_loadl_epi64(u_row_2.as_ptr() as *const __m128i); // u[0..7]
-    let u_d = _mm_loadl_epi64(u_row_2.as_ptr().add(1) as *const __m128i); // u[1..8]
+    // Load 8 chroma values from each row
+    let u_a = _mm_loadl_epi64(u_row_1.as_ptr() as *const __m128i);
+    let u_b = _mm_loadl_epi64(u_row_1.as_ptr().add(1) as *const __m128i);
+    let u_c = _mm_loadl_epi64(u_row_2.as_ptr() as *const __m128i);
+    let u_d = _mm_loadl_epi64(u_row_2.as_ptr().add(1) as *const __m128i);
 
     let v_a = _mm_loadl_epi64(v_row_1.as_ptr() as *const __m128i);
     let v_b = _mm_loadl_epi64(v_row_1.as_ptr().add(1) as *const __m128i);
     let v_c = _mm_loadl_epi64(v_row_2.as_ptr() as *const __m128i);
     let v_d = _mm_loadl_epi64(v_row_2.as_ptr().add(1) as *const __m128i);
 
-    // Compute fancy upsampled U/V for 8 pairs
-    // diag1 = (9*a + 3*b + 3*c + d + 8) / 16 - used for first pixel of pair
-    // diag2 = (3*a + 9*b + c + 3*d + 8) / 16 - used for second pixel of pair
+    // Compute fancy upsampled U/V
     let (u_diag1, u_diag2) = fancy_upsample_16(u_a, u_b, u_c, u_d);
     let (v_diag1, v_diag2) = fancy_upsample_16(v_a, v_b, v_c, v_d);
 
-    // Interleave to get per-pixel U/V: [diag1[0], diag2[0], diag1[1], diag2[1], ...]
+    // Interleave: [diag1[0], diag2[0], diag1[1], diag2[1], ...]
     let u_interleaved = _mm_unpacklo_epi8(u_diag1, u_diag2);
     let v_interleaved = _mm_unpacklo_epi8(v_diag1, v_diag2);
 
-    // Load Y values
+    // Load Y and expand to upper 8 bits of 16-bit words
     let y_vec = _mm_loadu_si128(y_row.as_ptr() as *const __m128i);
+    let zero = _mm_setzero_si128();
 
-    // Process first 8 pixels (low half of Y and interleaved U/V)
-    let y_lo = _mm_unpacklo_epi8(y_vec, _mm_setzero_si128());
-    let u_lo = _mm_unpacklo_epi8(u_interleaved, _mm_setzero_si128());
-    let v_lo = _mm_unpacklo_epi8(v_interleaved, _mm_setzero_si128());
+    // Process first 8 pixels
+    let y_lo = _mm_unpacklo_epi8(zero, y_vec);
+    let u_lo = _mm_unpacklo_epi8(zero, u_interleaved);
+    let v_lo = _mm_unpacklo_epi8(zero, v_interleaved);
+    let (r0, g0, b0) = convert_yuv444_to_rgb(y_lo, u_lo, v_lo);
 
-    // Extend to 32-bit for first 4 pixels
-    let y_0 = _mm_unpacklo_epi16(y_lo, _mm_setzero_si128());
-    let u_0 = _mm_unpacklo_epi16(u_lo, _mm_setzero_si128());
-    let v_0 = _mm_unpacklo_epi16(v_lo, _mm_setzero_si128());
+    // Process second 8 pixels
+    let y_hi = _mm_unpackhi_epi8(zero, y_vec);
+    let u_hi = _mm_unpackhi_epi8(zero, u_interleaved);
+    let v_hi = _mm_unpackhi_epi8(zero, v_interleaved);
+    let (r1, g1, b1) = convert_yuv444_to_rgb(y_hi, u_hi, v_hi);
 
-    let y_1 = _mm_unpackhi_epi16(y_lo, _mm_setzero_si128());
-    let u_1 = _mm_unpackhi_epi16(u_lo, _mm_setzero_si128());
-    let v_1 = _mm_unpackhi_epi16(v_lo, _mm_setzero_si128());
+    // Pack to 8-bit
+    let r8 = _mm_packus_epi16(r0, r1);
+    let g8 = _mm_packus_epi16(g0, g1);
+    let b8 = _mm_packus_epi16(b0, b1);
 
-    // Coefficients
-    let c_y = _mm_set1_epi32(Y_COEFF);
-    let c_vr = _mm_set1_epi32(V_R_COEFF);
-    let c_ug = _mm_set1_epi32(U_G_COEFF);
-    let c_vg = _mm_set1_epi32(V_G_COEFF);
-    let c_ub = _mm_set1_epi32(U_B_COEFF);
-    let r_off = _mm_set1_epi32(R_OFFSET);
-    let g_off = _mm_set1_epi32(G_OFFSET);
-    let b_off = _mm_set1_epi32(B_OFFSET);
+    // Interleave RGB using partial planar_to_24b
+    // For 16 pixels we need a simpler approach - just do 2 groups of 8
+    // Actually we can use the existing planar conversion with padding
 
-    // Convert pixels 0-3
-    let y_mul_0 = _mm_srai_epi32(_mm_mullo_epi32(y_0, c_y), 8);
-    let v_mul_r_0 = _mm_srai_epi32(_mm_mullo_epi32(v_0, c_vr), 8);
-    let u_mul_g_0 = _mm_srai_epi32(_mm_mullo_epi32(u_0, c_ug), 8);
-    let v_mul_g_0 = _mm_srai_epi32(_mm_mullo_epi32(v_0, c_vg), 8);
-    let u_mul_b_0 = _mm_srai_epi32(_mm_mullo_epi32(u_0, c_ub), 8);
+    // Simple approach: pack 16 R, 16 G, 16 B into RGBRGB...
+    // We have only 16 pixels, so need different packing
+    let rgb0 = r8;
+    let rgb1 = _mm_setzero_si128();
+    let rgb2 = g8;
+    let rgb3 = _mm_setzero_si128();
+    let rgb4 = b8;
+    let rgb5 = _mm_setzero_si128();
 
-    let r_0 = _mm_srai_epi32(
-        _mm_add_epi32(_mm_add_epi32(y_mul_0, v_mul_r_0), r_off),
-        6,
-    );
-    let g_0 = _mm_srai_epi32(
-        _mm_add_epi32(
-            _mm_sub_epi32(_mm_sub_epi32(y_mul_0, u_mul_g_0), v_mul_g_0),
-            g_off,
-        ),
-        6,
-    );
-    let b_0 = _mm_srai_epi32(
-        _mm_add_epi32(_mm_add_epi32(y_mul_0, u_mul_b_0), b_off),
-        6,
-    );
+    let (out0, out1, out2, _, _, _) = planar_to_24b(rgb0, rgb1, rgb2, rgb3, rgb4, rgb5);
 
-    // Convert pixels 4-7
-    let y_mul_1 = _mm_srai_epi32(_mm_mullo_epi32(y_1, c_y), 8);
-    let v_mul_r_1 = _mm_srai_epi32(_mm_mullo_epi32(v_1, c_vr), 8);
-    let u_mul_g_1 = _mm_srai_epi32(_mm_mullo_epi32(u_1, c_ug), 8);
-    let v_mul_g_1 = _mm_srai_epi32(_mm_mullo_epi32(v_1, c_vg), 8);
-    let u_mul_b_1 = _mm_srai_epi32(_mm_mullo_epi32(u_1, c_ub), 8);
-
-    let r_1 = _mm_srai_epi32(
-        _mm_add_epi32(_mm_add_epi32(y_mul_1, v_mul_r_1), r_off),
-        6,
-    );
-    let g_1 = _mm_srai_epi32(
-        _mm_add_epi32(
-            _mm_sub_epi32(_mm_sub_epi32(y_mul_1, u_mul_g_1), v_mul_g_1),
-            g_off,
-        ),
-        6,
-    );
-    let b_1 = _mm_srai_epi32(
-        _mm_add_epi32(_mm_add_epi32(y_mul_1, u_mul_b_1), b_off),
-        6,
-    );
-
-    // Pack first 8 pixels
-    let r16_lo = _mm_packs_epi32(r_0, r_1);
-    let g16_lo = _mm_packs_epi32(g_0, g_1);
-    let b16_lo = _mm_packs_epi32(b_0, b_1);
-
-    // Process second 8 pixels (high half)
-    let y_hi = _mm_unpackhi_epi8(y_vec, _mm_setzero_si128());
-    let u_hi = _mm_unpackhi_epi8(u_interleaved, _mm_setzero_si128());
-    let v_hi = _mm_unpackhi_epi8(v_interleaved, _mm_setzero_si128());
-
-    let y_2 = _mm_unpacklo_epi16(y_hi, _mm_setzero_si128());
-    let u_2 = _mm_unpacklo_epi16(u_hi, _mm_setzero_si128());
-    let v_2 = _mm_unpacklo_epi16(v_hi, _mm_setzero_si128());
-
-    let y_3 = _mm_unpackhi_epi16(y_hi, _mm_setzero_si128());
-    let u_3 = _mm_unpackhi_epi16(u_hi, _mm_setzero_si128());
-    let v_3 = _mm_unpackhi_epi16(v_hi, _mm_setzero_si128());
-
-    // Convert pixels 8-11
-    let y_mul_2 = _mm_srai_epi32(_mm_mullo_epi32(y_2, c_y), 8);
-    let v_mul_r_2 = _mm_srai_epi32(_mm_mullo_epi32(v_2, c_vr), 8);
-    let u_mul_g_2 = _mm_srai_epi32(_mm_mullo_epi32(u_2, c_ug), 8);
-    let v_mul_g_2 = _mm_srai_epi32(_mm_mullo_epi32(v_2, c_vg), 8);
-    let u_mul_b_2 = _mm_srai_epi32(_mm_mullo_epi32(u_2, c_ub), 8);
-
-    let r_2 = _mm_srai_epi32(
-        _mm_add_epi32(_mm_add_epi32(y_mul_2, v_mul_r_2), r_off),
-        6,
-    );
-    let g_2 = _mm_srai_epi32(
-        _mm_add_epi32(
-            _mm_sub_epi32(_mm_sub_epi32(y_mul_2, u_mul_g_2), v_mul_g_2),
-            g_off,
-        ),
-        6,
-    );
-    let b_2 = _mm_srai_epi32(
-        _mm_add_epi32(_mm_add_epi32(y_mul_2, u_mul_b_2), b_off),
-        6,
-    );
-
-    // Convert pixels 12-15
-    let y_mul_3 = _mm_srai_epi32(_mm_mullo_epi32(y_3, c_y), 8);
-    let v_mul_r_3 = _mm_srai_epi32(_mm_mullo_epi32(v_3, c_vr), 8);
-    let u_mul_g_3 = _mm_srai_epi32(_mm_mullo_epi32(u_3, c_ug), 8);
-    let v_mul_g_3 = _mm_srai_epi32(_mm_mullo_epi32(v_3, c_vg), 8);
-    let u_mul_b_3 = _mm_srai_epi32(_mm_mullo_epi32(u_3, c_ub), 8);
-
-    let r_3 = _mm_srai_epi32(
-        _mm_add_epi32(_mm_add_epi32(y_mul_3, v_mul_r_3), r_off),
-        6,
-    );
-    let g_3 = _mm_srai_epi32(
-        _mm_add_epi32(
-            _mm_sub_epi32(_mm_sub_epi32(y_mul_3, u_mul_g_3), v_mul_g_3),
-            g_off,
-        ),
-        6,
-    );
-    let b_3 = _mm_srai_epi32(
-        _mm_add_epi32(_mm_add_epi32(y_mul_3, u_mul_b_3), b_off),
-        6,
-    );
-
-    // Pack second 8 pixels
-    let r16_hi = _mm_packs_epi32(r_2, r_3);
-    let g16_hi = _mm_packs_epi32(g_2, g_3);
-    let b16_hi = _mm_packs_epi32(b_2, b_3);
-
-    // Combine and pack to bytes
-    let r8 = _mm_packus_epi16(r16_lo, r16_hi);
-    let g8 = _mm_packus_epi16(g16_lo, g16_hi);
-    let b8 = _mm_packus_epi16(b16_lo, b16_hi);
-
-    // Write interleaved RGB
-    let r_bytes: [u8; 16] = core::mem::transmute(r8);
-    let g_bytes: [u8; 16] = core::mem::transmute(g8);
-    let b_bytes: [u8; 16] = core::mem::transmute(b8);
-
-    for i in 0..16 {
-        rgb[i * 3] = r_bytes[i];
-        rgb[i * 3 + 1] = g_bytes[i];
-        rgb[i * 3 + 2] = b_bytes[i];
-    }
+    // Store 48 bytes (16 RGB pixels)
+    _mm_storeu_si128(rgb.as_mut_ptr() as *mut __m128i, out0);
+    _mm_storeu_si128(rgb.as_mut_ptr().add(16) as *mut __m128i, out1);
+    _mm_storeu_si128(rgb.as_mut_ptr().add(32) as *mut __m128i, out2);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Reference scalar implementation matching yuv.rs
-    fn scalar_yuv_to_rgb(y: u8, u: u8, v: u8) -> (u8, u8, u8) {
-        fn mulhi(val: u8, coeff: u16) -> i32 {
-            ((u32::from(val) * u32::from(coeff)) >> 8) as i32
-        }
-        fn clip(v: i32) -> u8 {
-            (v >> 6).clamp(0, 255) as u8
-        }
-        let r = clip(mulhi(y, 19077) + mulhi(v, 26149) - 14234);
-        let g = clip(mulhi(y, 19077) - mulhi(u, 6419) - mulhi(v, 13320) + 8708);
-        let b = clip(mulhi(y, 19077) + mulhi(u, 33050) - 17685);
-        (r, g, b)
-    }
-
     #[test]
-    fn test_yuv_to_rgb_simd_matches_scalar() {
-        if !is_x86_feature_detected!("sse4.1") {
+    fn test_yuv_to_rgb_matches_scalar() {
+        if !is_x86_feature_detected!("sse2") {
             return;
         }
 
-        // Test with various YUV values
+        // Test various YUV values
         let test_cases: [(u8, u8, u8); 8] = [
             (128, 128, 128), // Gray
             (255, 128, 128), // Bright gray
             (0, 128, 128),   // Dark
-            (203, 40, 42),   // Test values from yuv.rs
-            (77, 34, 97),    // From test_fancy_grid
-            (162, 101, 167), // From test_fancy_grid
-            (202, 84, 150),  // From test_fancy_grid
-            (185, 101, 167), // From test_fancy_grid
+            (203, 40, 42),   // Test values
+            (77, 34, 97),
+            (162, 101, 167),
+            (202, 84, 150),
+            (185, 101, 167),
         ];
 
+        // Test using the row function
         let y: Vec<u8> = test_cases.iter().map(|(y, _, _)| *y).collect();
         let u: Vec<u8> = test_cases.iter().map(|(_, u, _)| *u).collect();
         let v: Vec<u8> = test_cases.iter().map(|(_, _, v)| *v).collect();
-        let mut rgb_simd = [0u8; 24];
+
+        // For 4:2:0, we need half as many U/V values
+        let u_420: Vec<u8> = u.iter().step_by(2).copied().collect();
+        let v_420: Vec<u8> = v.iter().step_by(2).copied().collect();
+
+        let mut rgb_simd = vec![0u8; 24];
 
         unsafe {
-            yuv_to_rgb_8x(&y, &u, &v, &mut rgb_simd);
+            yuv420_to_rgb_row(&y, &u_420, &v_420, &mut rgb_simd);
         }
 
-        for (i, &(y_val, u_val, v_val)) in test_cases.iter().enumerate() {
-            let (r_scalar, g_scalar, b_scalar) = scalar_yuv_to_rgb(y_val, u_val, v_val);
+        // Compare with scalar (each U/V used for 2 pixels)
+        for i in 0..8 {
+            let y_val = y[i];
+            let u_val = u_420[i / 2];
+            let v_val = v_420[i / 2];
+            let (r_scalar, g_scalar, b_scalar) = yuv_to_rgb_scalar(y_val, u_val, v_val);
+
             let r_simd = rgb_simd[i * 3];
             let g_simd = rgb_simd[i * 3 + 1];
             let b_simd = rgb_simd[i * 3 + 2];
@@ -970,27 +636,28 @@ mod tests {
     }
 
     #[test]
-    fn test_yuv420_to_rgb_simd_matches_scalar() {
-        if !is_x86_feature_detected!("sse4.1") {
+    fn test_yuv_to_rgb_32_pixels() {
+        if !is_x86_feature_detected!("sse2") {
             return;
         }
 
-        // Test with 4:2:0 subsampling (4 U/V pairs for 8 Y values)
-        let y = [77u8, 162, 202, 185, 28, 13, 199, 182];
-        let u = [34u8, 101, 123, 163]; // Each shared by 2 Y pixels
-        let v = [97u8, 167, 149, 23];
-        let mut rgb_simd = [0u8; 24];
+        // Test 32 pixels
+        let y: Vec<u8> = (0..32).map(|i| (i * 8) as u8).collect();
+        let u: Vec<u8> = (0..16).map(|i| (128 + i * 4) as u8).collect();
+        let v: Vec<u8> = (0..16).map(|i| (128 - i * 4) as u8).collect();
+
+        let mut rgb_simd = vec![0u8; 96];
 
         unsafe {
-            yuv420_to_rgb_8x(&y, &u, &v, &mut rgb_simd);
+            yuv420_to_rgb_row(&y, &u, &v, &mut rgb_simd);
         }
 
-        // Compare with scalar - each U/V pair is used for 2 adjacent Y pixels
-        for i in 0..8 {
+        // Verify against scalar
+        for i in 0..32 {
             let y_val = y[i];
             let u_val = u[i / 2];
             let v_val = v[i / 2];
-            let (r_scalar, g_scalar, b_scalar) = scalar_yuv_to_rgb(y_val, u_val, v_val);
+            let (r_scalar, g_scalar, b_scalar) = yuv_to_rgb_scalar(y_val, u_val, v_val);
 
             let r_simd = rgb_simd[i * 3];
             let g_simd = rgb_simd[i * 3 + 1];
@@ -998,37 +665,22 @@ mod tests {
 
             assert_eq!(
                 r_simd, r_scalar,
-                "R mismatch at {}: SIMD={}, scalar={} (Y={}, U={}, V={})",
-                i, r_simd, r_scalar, y_val, u_val, v_val
+                "R mismatch at {}: SIMD={}, scalar={}",
+                i, r_simd, r_scalar
             );
             assert_eq!(
                 g_simd, g_scalar,
-                "G mismatch at {}: SIMD={}, scalar={} (Y={}, U={}, V={})",
-                i, g_simd, g_scalar, y_val, u_val, v_val
+                "G mismatch at {}: SIMD={}, scalar={}",
+                i, g_simd, g_scalar
             );
             assert_eq!(
                 b_simd, b_scalar,
-                "B mismatch at {}: SIMD={}, scalar={} (Y={}, U={}, V={})",
-                i, b_simd, b_scalar, y_val, u_val, v_val
+                "B mismatch at {}: SIMD={}, scalar={}",
+                i, b_simd, b_scalar
             );
         }
     }
 
-    #[test]
-    fn test_yuv_conversions_match_scalar() {
-        if !is_x86_feature_detected!("sse4.1") {
-            return;
-        }
-
-        // Test the exact values from yuv.rs tests
-        let (y, u, v) = (203, 40, 42);
-        let (r, g, b) = scalar_yuv_to_rgb(y, u, v);
-        assert_eq!(r, 80, "R mismatch");
-        assert_eq!(g, 255, "G mismatch");
-        assert_eq!(b, 40, "B mismatch");
-    }
-
-    /// Reference scalar fancy chroma interpolation matching yuv.rs
     fn get_fancy_chroma_value(main: u8, secondary1: u8, secondary2: u8, tertiary: u8) -> u8 {
         let val0 = u16::from(main);
         let val1 = u16::from(secondary1);
@@ -1038,18 +690,14 @@ mod tests {
     }
 
     #[test]
-    fn test_fancy_upsample_8_pairs_matches_scalar() {
-        if !is_x86_feature_detected!("sse4.1") {
+    fn test_fancy_upsample_8_pairs() {
+        if !is_x86_feature_detected!("sse2") {
             return;
         }
 
-        // Use test data from yuv.rs test_fancy_grid but expanded for 16 pixels
-        // Y values (16 values starting from position 1 in the row)
         let y_row: [u8; 16] = [
             77, 162, 202, 185, 28, 13, 199, 182, 135, 147, 164, 135, 66, 27, 171, 130,
         ];
-
-        // U/V values (9 values from each row for 8 pixel pairs)
         let u_row_1: [u8; 9] = [34, 101, 84, 123, 163, 90, 110, 140, 120];
         let u_row_2: [u8; 9] = [123, 163, 133, 150, 100, 80, 95, 105, 115];
         let v_row_1: [u8; 9] = [97, 167, 150, 149, 23, 45, 67, 89, 100];
@@ -1060,10 +708,9 @@ mod tests {
             fancy_upsample_8_pairs(&y_row, &u_row_1, &u_row_2, &v_row_1, &v_row_2, &mut rgb_simd);
         }
 
-        // Compare with scalar implementation
+        // Compare with scalar
         let mut rgb_scalar = [0u8; 48];
         for i in 0..8 {
-            // For pixel pair i, we need u[i], u[i+1] from both rows
             let u_a = u_row_1[i];
             let u_b = u_row_1[i + 1];
             let u_c = u_row_2[i];
@@ -1073,20 +720,16 @@ mod tests {
             let v_c = v_row_2[i];
             let v_d = v_row_2[i + 1];
 
-            // First pixel of pair uses diag1 = (9a + 3b + 3c + d) / 16
             let u_diag1 = get_fancy_chroma_value(u_a, u_b, u_c, u_d);
             let v_diag1 = get_fancy_chroma_value(v_a, v_b, v_c, v_d);
-
-            // Second pixel of pair uses diag2 = (3a + 9b + c + 3d) / 16
-            // which is get_fancy_chroma_value(b, a, d, c)
             let u_diag2 = get_fancy_chroma_value(u_b, u_a, u_d, u_c);
             let v_diag2 = get_fancy_chroma_value(v_b, v_a, v_d, v_c);
 
             let y1 = y_row[i * 2];
             let y2 = y_row[i * 2 + 1];
 
-            let (r1, g1, b1) = scalar_yuv_to_rgb(y1, u_diag1, v_diag1);
-            let (r2, g2, b2) = scalar_yuv_to_rgb(y2, u_diag2, v_diag2);
+            let (r1, g1, b1) = yuv_to_rgb_scalar(y1, u_diag1, v_diag1);
+            let (r2, g2, b2) = yuv_to_rgb_scalar(y2, u_diag2, v_diag2);
 
             rgb_scalar[i * 6] = r1;
             rgb_scalar[i * 6 + 1] = g1;

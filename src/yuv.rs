@@ -162,7 +162,7 @@ fn fill_row_fancy_with_2_uv_rows<const BPP: usize>(
 ) {
     // Use SIMD for RGB (BPP=3) if available and row is wide enough
     #[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
-    if BPP == 3 && y_row.len() >= 17 && is_x86_feature_detected!("sse4.1") {
+    if BPP == 3 && y_row.len() >= 17 && is_x86_feature_detected!("sse2") {
         fill_row_fancy_with_2_uv_rows_simd::<BPP>(
             row_buffer, y_row, u_row_1, u_row_2, v_row_1, v_row_2,
         );
@@ -434,7 +434,7 @@ fn fill_rgba_row_simple<const BPP: usize>(
 ) {
     // Use SIMD for RGB (BPP=3) if available and row is wide enough
     #[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
-    if BPP == 3 && y_vec.len() >= 8 && is_x86_feature_detected!("sse4.1") {
+    if BPP == 3 && y_vec.len() >= 8 && is_x86_feature_detected!("sse2") {
         fill_rgba_row_simple_simd::<BPP>(y_vec, u_vec, v_vec, rgba);
         return;
     }
@@ -449,34 +449,9 @@ fn fill_rgba_row_simple_simd<const BPP: usize>(
     v_vec: &[u8],
     rgba: &mut [u8],
 ) {
-    // Process 8 pixels at a time using SIMD
-    let mut y_offset = 0;
-    let mut uv_offset = 0;
-    let mut rgb_offset = 0;
-
-    // Process chunks of 8 Y pixels (4 U/V pairs)
-    while y_offset + 8 <= y_vec.len() && uv_offset + 4 <= u_vec.len() && rgb_offset + 24 <= rgba.len() {
-        unsafe {
-            crate::yuv_simd::yuv420_to_rgb_8x(
-                &y_vec[y_offset..],
-                &u_vec[uv_offset..],
-                &v_vec[uv_offset..],
-                &mut rgba[rgb_offset..],
-            );
-        }
-        y_offset += 8;
-        uv_offset += 4;
-        rgb_offset += 24;
-    }
-
-    // Handle remaining pixels with scalar code
-    if y_offset < y_vec.len() {
-        fill_rgba_row_simple_scalar::<BPP>(
-            &y_vec[y_offset..],
-            &u_vec[uv_offset..],
-            &v_vec[uv_offset..],
-            &mut rgba[rgb_offset..],
-        );
+    // Use the new row-based SIMD function that processes 32 pixels at a time
+    unsafe {
+        crate::yuv_simd::yuv420_to_rgb_row(y_vec, u_vec, v_vec, rgba);
     }
 }
 

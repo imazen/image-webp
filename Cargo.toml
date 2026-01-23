@@ -34,7 +34,7 @@ rgb = "0.8"
 webp = "0.3.0"
 
 [features]
-default = ["fast-yuv", "simd"]
+default = ["fast-yuv", "simd", "unsafe-simd"]
 fast-yuv = ["dep:yuv"]
 simd = ["dep:wide"]
 # Enable raw SIMD intrinsics (requires unsafe). Provides best performance on x86-64.
