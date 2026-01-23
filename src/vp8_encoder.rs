@@ -1,13 +1,8 @@
 use alloc::vec;
 use alloc::vec::Vec;
+use core::mem;
 
-#[cfg(feature = "std")]
-use std::io::Write;
-
-#[cfg(feature = "std")]
-use byteorder_lite::WriteBytesExt;
-
-use byteorder_lite::LittleEndian;
+use crate::vec_writer::VecWriter;
 
 use crate::transform;
 use crate::vp8_arithmetic_encoder::ArithmeticEncoder;
@@ -48,14 +43,14 @@ fn quality_to_compression(quality: u8) -> f64 {
         2.0 * c - 1.0
     };
     // File size roughly scales as pow(quantizer, 3), so we use inverse
-    linear_c.powf(1.0 / 3.0)
+    libm::pow(linear_c, 1.0 / 3.0)
 }
 
 /// Convert user-facing quality (0-100) to internal quant index (0-127)
 /// Ported from libwebp's VP8SetSegmentParams().
 fn quality_to_quant_index(quality: u8) -> u8 {
     let c = quality_to_compression(quality);
-    let q = (127.0 * (1.0 - c)).round() as i32;
+    let q = libm::round(127.0 * (1.0 - c)) as i32;
     q.clamp(0, 127) as u8
 }
 
@@ -178,8 +173,8 @@ struct MacroblockInfo {
 
 type ChromaCoeffs = [i32; 16 * 4];
 
-struct Vp8Encoder<W> {
-    writer: W,
+struct Vp8Encoder<'a> {
+    writer: &'a mut Vec<u8>,
     frame: Frame,
     /// The encoder for the macroblock headers and the compressed frame header
     encoder: ArithmeticEncoder,
@@ -238,13 +233,13 @@ struct Vp8Encoder<W> {
     left_derr: [[i8; 2]; 2],
 }
 
-impl<W: Write> Vp8Encoder<W> {
-    fn new(writer: W) -> Self {
+impl<'a> Vp8Encoder<'a> {
+    fn new(writer: &'a mut Vec<u8>) -> Self {
         Self {
             writer,
             frame: Frame::default(),
             encoder: ArithmeticEncoder::new(),
-            segments: std::array::from_fn(|_| Segment::default()),
+            segments: core::array::from_fn(|_| Segment::default()),
             segments_enabled: false,
             segments_update_map: false,
             segment_tree_probs: [255, 255, 255], // Default probs
@@ -317,26 +312,21 @@ impl<W: Write> Vp8Encoder<W> {
     }
 
     /// Writes the uncompressed part of the frame header (9.1)
-    fn write_uncompressed_frame_header(
-        &mut self,
-        partition_size: u32,
-    ) -> Result<(), EncodingError> {
+    fn write_uncompressed_frame_header(&mut self, partition_size: u32) {
         let version = u32::from(self.frame.version);
         let for_display = if self.frame.for_display { 1 } else { 0 };
 
         let keyframe_bit = 0;
         let tag = (partition_size << 5) | (for_display << 4) | (version << 1) | (keyframe_bit);
-        self.writer.write_u24::<LittleEndian>(tag)?;
+        self.writer.write_u24_le(tag);
 
         let magic_bytes_buffer: [u8; 3] = [0x9d, 0x01, 0x2a];
-        self.writer.write_all(&magic_bytes_buffer)?;
+        self.writer.write_all(&magic_bytes_buffer);
 
         let width = self.frame.width & 0x3FFF;
         let height = self.frame.height & 0x3FFF;
-        self.writer.write_u16::<LittleEndian>(width)?;
-        self.writer.write_u16::<LittleEndian>(height)?;
-
-        Ok(())
+        self.writer.write_u16_le(width);
+        self.writer.write_u16_le(height);
     }
 
     fn encode_compressed_frame_header(&mut self) {
@@ -381,8 +371,8 @@ impl<W: Write> Vp8Encoder<W> {
         }
     }
 
-    fn write_partitions(&mut self) -> Result<(), EncodingError> {
-        let partitions = std::mem::take(&mut self.partitions);
+    fn write_partitions(&mut self) {
+        let partitions = mem::take(&mut self.partitions);
         let partitions_bytes: Vec<Vec<u8>> = partitions
             .into_iter()
             .map(|x| x.flush_and_get_buffer())
@@ -390,17 +380,14 @@ impl<W: Write> Vp8Encoder<W> {
         // write the sizes of the partitions if there's more than 1
         if partitions_bytes.len() > 1 {
             for partition in partitions_bytes[..partitions_bytes.len() - 1].iter() {
-                self.writer
-                    .write_u24::<LittleEndian>(partition.len() as u32)?;
-                self.writer.write_all(partition)?;
+                self.writer.write_u24_le(partition.len() as u32);
+                self.writer.write_all(partition);
             }
         }
 
         // write the final partition
         self.writer
-            .write_all(&partitions_bytes[partitions_bytes.len() - 1])?;
-
-        Ok(())
+            .write_all(&partitions_bytes[partitions_bytes.len() - 1]);
     }
 
     fn encode_segment_updates(&mut self) {
@@ -1488,14 +1475,14 @@ impl<W: Write> Vp8Encoder<W> {
             }
         }
 
-        let compressed_header_encoder = std::mem::take(&mut self.encoder);
+        let compressed_header_encoder = mem::take(&mut self.encoder);
         let compressed_header_bytes = compressed_header_encoder.flush_and_get_buffer();
 
-        self.write_uncompressed_frame_header(compressed_header_bytes.len() as u32)?;
+        self.write_uncompressed_frame_header(compressed_header_bytes.len() as u32);
 
-        self.writer.write_all(&compressed_header_bytes)?;
+        self.writer.write_all(&compressed_header_bytes);
 
-        self.write_partitions()?;
+        self.write_partitions();
 
         Ok(())
     }
@@ -3134,8 +3121,8 @@ fn get_coeffs0_from_block(blocks: &[i32; 16 * 16]) -> [i32; 16] {
     coeffs0
 }
 
-pub(crate) fn encode_frame_lossy<W: Write>(
-    writer: W,
+pub(crate) fn encode_frame_lossy(
+    writer: &mut Vec<u8>,
     data: &[u8],
     width: u32,
     height: u32,

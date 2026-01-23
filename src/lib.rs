@@ -87,8 +87,7 @@ pub use self::decoder::{
 // Encoder exports (error type always available for compatibility)
 pub use self::encoder::EncodingError;
 
-// Encoder exports (requires std for Write trait)
-#[cfg(feature = "std")]
+// Encoder exports - now work with alloc (no std required)
 pub use self::encoder::{ColorType, Encoder, EncoderConfig, EncoderParams, Preset, WebPEncoder};
 
 // Slice reader for no_std support
@@ -105,8 +104,12 @@ mod loop_filter_avx2;
 mod lossless;
 mod lossless_transform;
 
-// Encoder module (requires std for Write trait)
+// Encoder modules - now work with alloc (no std required)
 mod encoder;
+mod vec_writer;
+mod vp8_arithmetic_encoder;
+mod vp8_cost;
+mod vp8_encoder;
 
 // Shared modules (for encoder and decoder)
 #[cfg(feature = "simd")]
@@ -115,14 +118,8 @@ mod transform;
 #[cfg(feature = "simd")]
 mod transform_simd_intrinsics;
 mod vp8_arithmetic_decoder;
-#[cfg(feature = "std")]
-mod vp8_arithmetic_encoder;
 mod vp8_bit_reader;
 mod vp8_common;
-#[cfg(feature = "std")]
-mod vp8_cost;
-#[cfg(feature = "std")]
-mod vp8_encoder;
 mod vp8_prediction;
 mod yuv;
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]

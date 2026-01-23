@@ -1168,7 +1168,7 @@ pub fn trellis_quantize_block(
             quantdiv(coeff_with_sharpen as u32, iq, thresh_bias).min(MAX_LEVEL as i32);
 
         // Swap score state indices
-        std::mem::swap(&mut ss_cur_idx, &mut ss_prev_idx);
+        core::mem::swap(&mut ss_cur_idx, &mut ss_prev_idx);
 
         // Test all alternate level values: level0 and level0+1
         for delta in 0..NUM_NODES {
@@ -3219,7 +3219,7 @@ pub fn compute_segment_quant(base_quant: u8, segment_alpha: i32, sns_strength: u
     let c_base = 1.0 - (base_quant as f64 / 127.0);
 
     // Apply power-law modulation
-    let c = c_base.powf(expn);
+    let c = libm::pow(c_base, expn);
 
     // Convert back to quantizer index
     let q = (127.0 * (1.0 - c)) as i32;
