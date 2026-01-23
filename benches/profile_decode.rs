@@ -94,13 +94,30 @@ fn benchmark_decode(webp_data: &[u8], iterations: usize) {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    let webp_path = args.get(1).map(|s| s.as_str());
+    let input_path = args.get(1).map(|s| s.as_str());
     let iterations: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(100);
 
-    if let Some(path) = webp_path {
-        println!("=== Testing with provided WebP: {} ===\n", path);
-        let webp_data = load_webp(Path::new(path));
-        benchmark_decode(&webp_data, iterations);
+    if let Some(path) = input_path {
+        if path.ends_with(".webp") {
+            println!("=== Testing with provided WebP: {} ===\n", path);
+            let webp_data = load_webp(Path::new(path));
+            benchmark_decode(&webp_data, iterations);
+        } else if path.ends_with(".png") {
+            println!("=== Testing with PNG (encoding with libwebp): {} ===\n", path);
+            let (rgb_data, width, height) = load_png(Path::new(path));
+            let pixels = width * height;
+            println!("Source: {}x{} ({:.2} MPix)", width, height, pixels as f64 / 1_000_000.0);
+            let webp_data = {
+                let encoder = webp::Encoder::from_rgb(&rgb_data, width, height);
+                encoder.encode(75.0).to_vec()
+            };
+            println!("Encoded to {} bytes ({:.2} bpp)\n", webp_data.len(),
+                     webp_data.len() as f64 * 8.0 / pixels as f64);
+            benchmark_decode(&webp_data, iterations);
+        } else {
+            eprintln!("Unknown file type. Use .webp or .png");
+            std::process::exit(1);
+        }
     } else {
         // Test with both libwebp-encoded and our-encoded WebP
         let png_path = concat!(env!("HOME"), "/work/codec-corpus/kodak/1.png");
