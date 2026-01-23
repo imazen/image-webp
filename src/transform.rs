@@ -1,3 +1,6 @@
+// Allow dead code when std is disabled - some functions are encoder-only
+#![cfg_attr(not(feature = "std"), allow(dead_code))]
+
 /// 16 bit fixed point version of cos(PI/8) * sqrt(2) - 1
 const CONST1: i64 = 20091;
 /// 16 bit fixed point version of sin(PI/8) * sqrt(2)

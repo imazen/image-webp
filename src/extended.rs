@@ -1,9 +1,10 @@
-use super::lossless::LosslessDecoder;
-use crate::decoder::DecodingError;
-use byteorder_lite::ReadBytesExt;
-use std::io::{BufRead, Read};
+use alloc::vec;
+use alloc::vec::Vec;
 
+use super::lossless::LosslessDecoder;
 use crate::alpha_blending::do_alpha_blending;
+use crate::decoder::DecodingError;
+use crate::slice_reader::SliceReader;
 
 #[derive(Debug, Clone)]
 pub(crate) struct WebPExtendedInfo {
@@ -209,8 +210,8 @@ pub(crate) fn get_alpha_predictor(
     }
 }
 
-pub(crate) fn read_extended_header<R: Read>(
-    reader: &mut R,
+pub(crate) fn read_extended_header(
+    reader: &mut SliceReader,
 ) -> Result<WebPExtendedInfo, DecodingError> {
     let chunk_flags = reader.read_u8()?;
 
@@ -246,7 +247,7 @@ pub(crate) fn read_extended_header<R: Read>(
     Ok(info)
 }
 
-pub(crate) fn read_3_bytes<R: Read>(reader: &mut R) -> Result<u32, DecodingError> {
+pub(crate) fn read_3_bytes(reader: &mut SliceReader) -> Result<u32, DecodingError> {
     let mut buffer: [u8; 3] = [0; 3];
     reader.read_exact(&mut buffer)?;
     let value: u32 =
@@ -269,12 +270,15 @@ pub(crate) enum FilteringMethod {
     Gradient,
 }
 
-pub(crate) fn read_alpha_chunk<R: BufRead>(
-    reader: &mut R,
+pub(crate) fn read_alpha_chunk(
+    data: &[u8],
     width: u16,
     height: u16,
 ) -> Result<AlphaChunk, DecodingError> {
-    let info_byte = reader.read_u8()?;
+    if data.is_empty() {
+        return Err(DecodingError::BitStreamError);
+    }
+    let info_byte = data[0];
 
     let preprocessing = (info_byte & 0b00110000) >> 4;
     let filtering = (info_byte & 0b00001100) >> 2;
@@ -300,27 +304,30 @@ pub(crate) fn read_alpha_chunk<R: BufRead>(
         _ => return Err(DecodingError::InvalidCompressionMethod),
     };
 
-    let data = if lossless_compression {
-        let mut decoder = LosslessDecoder::new(reader);
+    let alpha_data = &data[1..];
+    let decoded_data = if lossless_compression {
+        let mut decoder = LosslessDecoder::new(alpha_data);
 
-        let mut data = vec![0; usize::from(width) * usize::from(height) * 4];
-        decoder.decode_frame(u32::from(width), u32::from(height), true, &mut data)?;
+        let mut rgba_data = vec![0; usize::from(width) * usize::from(height) * 4];
+        decoder.decode_frame(u32::from(width), u32::from(height), true, &mut rgba_data)?;
 
         let mut green = vec![0; usize::from(width) * usize::from(height)];
-        for (rgba_val, green_val) in data.chunks_exact(4).zip(green.iter_mut()) {
+        for (rgba_val, green_val) in rgba_data.chunks_exact(4).zip(green.iter_mut()) {
             *green_val = rgba_val[1];
         }
         green
     } else {
-        let mut framedata = vec![0; width as usize * height as usize];
-        reader.read_exact(&mut framedata)?;
-        framedata
+        let required = width as usize * height as usize;
+        if alpha_data.len() < required {
+            return Err(DecodingError::BitStreamError);
+        }
+        alpha_data[..required].to_vec()
     };
 
     let chunk = AlphaChunk {
         _preprocessing: preprocessing,
         filtering_method,
-        data,
+        data: decoded_data,
     };
 
     Ok(chunk)

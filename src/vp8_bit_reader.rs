@@ -7,6 +7,9 @@
 // - Uses leading_zeros() for normalization (single CPU instruction)
 // - VP8GetBitAlt algorithm
 
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+
 use crate::decoder::DecodingError;
 
 /// BITS can be any multiple of 8 from 8 to 56 (inclusive).

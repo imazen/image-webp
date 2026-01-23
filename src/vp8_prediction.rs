@@ -2,6 +2,9 @@
 //!
 //! Functions for doing prediction and for setting up buffers for prediction
 
+// Allow dead code when std is disabled - some functions are encoder-only
+#![cfg_attr(not(feature = "std"), allow(dead_code))]
+
 /// Luma prediction block stride - 32 bytes for cache alignment (matches libwebp BPS)
 /// Layout: 1 border pixel + 16 luma pixels + 4 top-right + padding to 32
 pub(crate) const LUMA_STRIDE: usize = 32;

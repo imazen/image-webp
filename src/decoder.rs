@@ -124,22 +124,19 @@ pub enum DecodingError {
     NoMoreFrames,
 }
 
-// Everything below requires std due to Read/BufRead/Seek traits
-#[cfg(feature = "std")]
-mod std_decoder {
-    use super::*;
-    use alloc::vec::Vec;
-    use core::num::NonZeroU16;
-    use core::ops::Range;
+// Core decoder implementation using SliceReader for no_std compatibility
+use alloc::format;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::num::NonZeroU16;
+use core::ops::Range;
 
-    use byteorder_lite::{LittleEndian, ReadBytesExt};
-    use hashbrown::HashMap;
+use hashbrown::HashMap;
 
-    use std::io::{self, BufRead, Cursor, Read, Seek};
-
-    use crate::extended::{self, get_alpha_predictor, read_alpha_chunk, WebPExtendedInfo};
-    use crate::lossless::LosslessDecoder;
-    use crate::vp8::Vp8Decoder;
+use crate::extended::{self, get_alpha_predictor, read_alpha_chunk, WebPExtendedInfo};
+use crate::lossless::LosslessDecoder;
+use crate::slice_reader::SliceReader;
+use crate::vp8::Vp8Decoder;
 
 /// All possible RIFF chunks in a WebP image file
 #[allow(clippy::upper_case_acronyms)]
@@ -283,8 +280,8 @@ pub enum UpsamplingMethod {
 }
 
 /// WebP image format decoder.
-pub struct WebPDecoder<R> {
-    r: R,
+pub struct WebPDecoder<'a> {
+    r: SliceReader<'a>,
     memory_limit: usize,
 
     width: u32,
@@ -304,21 +301,19 @@ pub struct WebPDecoder<R> {
     webp_decode_options: WebPDecodeOptions,
 }
 
-impl<R: BufRead + Seek> WebPDecoder<R> {
-    /// Create a new `WebPDecoder` from the reader `r`. The decoder performs many small reads, so the
-    /// reader should be buffered.
-    pub fn new(r: R) -> Result<Self, DecodingError> {
-        Self::new_with_options(r, WebPDecodeOptions::default())
+impl<'a> WebPDecoder<'a> {
+    /// Create a new `WebPDecoder` from the data slice.
+    pub fn new(data: &'a [u8]) -> Result<Self, DecodingError> {
+        Self::new_with_options(data, WebPDecodeOptions::default())
     }
 
-    /// Create a new `WebPDecoder` from the reader `r` with the options `WebPDecodeOptions`. The decoder
-    /// performs many small reads, so the reader should be buffered.
+    /// Create a new `WebPDecoder` from the data slice with the given options.
     pub fn new_with_options(
-        r: R,
+        data: &'a [u8],
         webp_decode_options: WebPDecodeOptions,
     ) -> Result<Self, DecodingError> {
         let mut decoder = Self {
-            r,
+            r: SliceReader::new(data),
             width: 0,
             height: 0,
             num_frames: 0,
@@ -347,16 +342,16 @@ impl<R: BufRead + Seek> WebPDecoder<R> {
         }
 
         let (chunk, chunk_size, chunk_size_rounded) = read_chunk_header(&mut self.r)?;
-        let start = self.r.stream_position()?;
+        let start = self.r.stream_position();
 
         match chunk {
             WebPRiffChunk::VP8 => {
-                let tag = self.r.read_u24::<LittleEndian>()?;
+                let tag = self.r.read_u24_le()?;
 
                 let keyframe = tag & 1 == 0;
                 if !keyframe {
                     return Err(DecodingError::UnsupportedFeature(
-                        "Non-keyframe frames".to_owned(),
+                        "Non-keyframe frames".into(),
                     ));
                 }
 
@@ -366,8 +361,8 @@ impl<R: BufRead + Seek> WebPDecoder<R> {
                     return Err(DecodingError::Vp8MagicInvalid(tag));
                 }
 
-                let w = self.r.read_u16::<LittleEndian>()?;
-                let h = self.r.read_u16::<LittleEndian>()?;
+                let w = self.r.read_u16_le()?;
+                let h = self.r.read_u16_le()?;
 
                 self.width = u32::from(w & 0x3FFF);
                 self.height = u32::from(h & 0x3FFF);
@@ -386,7 +381,7 @@ impl<R: BufRead + Seek> WebPDecoder<R> {
                     return Err(DecodingError::LosslessSignatureInvalid(signature));
                 }
 
-                let header = self.r.read_u32::<LittleEndian>()?;
+                let header = self.r.read_u32_le()?;
                 let version = header >> 29;
                 if version != 0 {
                     return Err(DecodingError::VersionNumberInvalid(version as u8));
@@ -406,7 +401,7 @@ impl<R: BufRead + Seek> WebPDecoder<R> {
 
                 let mut position = start + chunk_size_rounded;
                 let max_position = position + riff_size.saturating_sub(12);
-                self.r.seek(io::SeekFrom::Start(position))?;
+                self.r.seek_from_start(position)?;
 
                 while position < max_position {
                     match read_chunk_header(&mut self.r) {
@@ -425,7 +420,7 @@ impl<R: BufRead + Seek> WebPDecoder<R> {
                                 }
 
                                 self.r.seek_relative(12)?;
-                                let duration = self.r.read_u32::<LittleEndian>()? & 0xffffff;
+                                let duration = self.r.read_u32_le()? & 0xffffff;
                                 self.loop_duration =
                                     self.loop_duration.wrapping_add(u64::from(duration));
 
@@ -449,9 +444,7 @@ impl<R: BufRead + Seek> WebPDecoder<R> {
 
                             self.r.seek_relative(chunk_size_rounded as i64)?;
                         }
-                        Err(DecodingError::IoError(e))
-                            if e.kind() == io::ErrorKind::UnexpectedEof =>
-                        {
+                        Err(DecodingError::BitStreamError) => {
                             break;
                         }
                         Err(e) => return Err(e),
@@ -477,9 +470,9 @@ impl<R: BufRead + Seek> WebPDecoder<R> {
                 if info.animation {
                     match self.read_chunk(WebPRiffChunk::ANIM, 6) {
                         Ok(Some(chunk)) => {
-                            let mut cursor = Cursor::new(chunk);
+                            let mut cursor = SliceReader::new(&chunk);
                             cursor.read_exact(&mut info.background_color_hint)?;
-                            self.loop_count = match cursor.read_u16::<LittleEndian>()? {
+                            self.loop_count = match cursor.read_u16_le()? {
                                 0 => LoopCount::Forever,
                                 n => LoopCount::Times(NonZeroU16::new(n).unwrap()),
                             };
@@ -499,7 +492,7 @@ impl<R: BufRead + Seek> WebPDecoder<R> {
                 // hashmap so that we can read them later.
                 if let Some(range) = self.chunks.get(&WebPRiffChunk::ANMF).cloned() {
                     let mut position = range.start + 16;
-                    self.r.seek(io::SeekFrom::Start(position))?;
+                    self.r.seek_from_start(position)?;
                     for _ in 0..2 {
                         let (subchunk, subchunk_size, subchunk_size_rounded) =
                             read_chunk_header(&mut self.r)?;
@@ -545,7 +538,7 @@ impl<R: BufRead + Seek> WebPDecoder<R> {
             Ok(())
         } else {
             Err(DecodingError::InvalidParameter(
-                "Background color can only be set on animated webp".to_owned(),
+                "Background color can only be set on animated webp".into(),
             ))
         }
     }
@@ -570,7 +563,7 @@ impl<R: BufRead + Seek> WebPDecoder<R> {
     }
 
     /// Returns whether the image is lossy. For animated images, this is true if any frame is lossy.
-    pub fn is_lossy(&mut self) -> bool {
+    pub fn is_lossy(&self) -> bool {
         self.is_lossy
     }
 
@@ -604,7 +597,7 @@ impl<R: BufRead + Seek> WebPDecoder<R> {
                     return Err(DecodingError::MemoryLimitExceeded);
                 }
 
-                self.r.seek(io::SeekFrom::Start(range.start))?;
+                self.r.seek_from_start(range.start)?;
                 let mut data = vec![0; (range.end - range.start) as usize];
                 self.r.read_exact(&mut data)?;
                 Ok(Some(data))
@@ -646,14 +639,15 @@ impl<R: BufRead + Seek> WebPDecoder<R> {
         }
 
         if self.is_animated() {
-            let saved = std::mem::take(&mut self.animation);
+            let saved = core::mem::take(&mut self.animation);
             self.animation.next_frame_start =
                 self.chunks.get(&WebPRiffChunk::ANMF).unwrap().start - 8;
             let result = self.read_frame(buf);
             self.animation = saved;
             result?;
         } else if let Some(range) = self.chunks.get(&WebPRiffChunk::VP8L) {
-            let mut decoder = LosslessDecoder::new(range_reader(&mut self.r, range.clone())?);
+            let data_slice = &self.r.get_ref()[range.start as usize..range.end as usize];
+            let mut decoder = LosslessDecoder::new(data_slice);
 
             if self.has_alpha {
                 decoder.decode_frame(self.width, self.height, false, buf)?;
@@ -669,8 +663,8 @@ impl<R: BufRead + Seek> WebPDecoder<R> {
                 .chunks
                 .get(&WebPRiffChunk::VP8)
                 .ok_or(DecodingError::ChunkMissing)?;
-            let reader = range_reader(&mut self.r, range.start..range.end)?;
-            let frame = Vp8Decoder::decode_frame(reader)?;
+            let data_slice = &self.r.get_ref()[range.start as usize..range.end as usize];
+            let frame = Vp8Decoder::decode_frame(data_slice)?;
             if u32::from(frame.width) != self.width || u32::from(frame.height) != self.height {
                 return Err(DecodingError::InconsistentImageSizes);
             }
@@ -683,11 +677,9 @@ impl<R: BufRead + Seek> WebPDecoder<R> {
                     .get(&WebPRiffChunk::ALPH)
                     .ok_or(DecodingError::ChunkMissing)?
                     .clone();
-                let alpha_chunk = read_alpha_chunk(
-                    &mut range_reader(&mut self.r, range)?,
-                    self.width as u16,
-                    self.height as u16,
-                )?;
+                let alpha_slice = &self.r.get_ref()[range.start as usize..range.end as usize];
+                let alpha_chunk =
+                    read_alpha_chunk(alpha_slice, self.width as u16, self.height as u16)?;
 
                 for y in 0..frame.height {
                     for x in 0..frame.width {
@@ -735,8 +727,7 @@ impl<R: BufRead + Seek> WebPDecoder<R> {
             unreachable!()
         };
 
-        self.r
-            .seek(io::SeekFrom::Start(self.animation.next_frame_start))?;
+        self.r.seek_from_start(self.animation.next_frame_start)?;
 
         let anmf_size = match read_chunk_header(&mut self.r)? {
             (WebPRiffChunk::ANMF, size, _) if size >= 32 => size,
@@ -773,8 +764,8 @@ impl<R: BufRead + Seek> WebPDecoder<R> {
 
         let (frame, frame_has_alpha): (Vec<u8>, bool) = match chunk {
             WebPRiffChunk::VP8 => {
-                let reader = (&mut self.r).take(chunk_size);
-                let raw_frame = Vp8Decoder::decode_frame(reader)?;
+                let data_slice = self.r.take_slice(chunk_size as usize)?;
+                let raw_frame = Vp8Decoder::decode_frame(data_slice)?;
                 if u32::from(raw_frame.width) != frame_width
                     || u32::from(raw_frame.height) != frame_height
                 {
@@ -785,8 +776,8 @@ impl<R: BufRead + Seek> WebPDecoder<R> {
                 (rgb_frame, false)
             }
             WebPRiffChunk::VP8L => {
-                let reader = (&mut self.r).take(chunk_size);
-                let mut lossless_decoder = LosslessDecoder::new(reader);
+                let data_slice = self.r.take_slice(chunk_size as usize)?;
+                let mut lossless_decoder = LosslessDecoder::new(data_slice);
                 let mut rgba_frame = vec![0; frame_width as usize * frame_height as usize * 4];
                 lossless_decoder.decode_frame(frame_width, frame_height, false, &mut rgba_frame)?;
                 (rgba_frame, true)
@@ -797,19 +788,23 @@ impl<R: BufRead + Seek> WebPDecoder<R> {
                 }
 
                 // read alpha
-                let next_chunk_start = self.r.stream_position()? + chunk_size_rounded;
-                let mut reader = (&mut self.r).take(chunk_size);
+                let alpha_slice = self.r.take_slice(chunk_size as usize)?;
+                // Skip padding if chunk_size is odd
+                if chunk_size_rounded > chunk_size {
+                    self.r
+                        .seek_relative((chunk_size_rounded - chunk_size) as i64)?;
+                }
                 let alpha_chunk =
-                    read_alpha_chunk(&mut reader, frame_width as u16, frame_height as u16)?;
+                    read_alpha_chunk(alpha_slice, frame_width as u16, frame_height as u16)?;
 
                 // read opaque
-                self.r.seek(io::SeekFrom::Start(next_chunk_start))?;
                 let (next_chunk, next_chunk_size, _) = read_chunk_header(&mut self.r)?;
                 if chunk_size + next_chunk_size + 32 > anmf_size {
                     return Err(DecodingError::ChunkHeaderInvalid(next_chunk.to_fourcc()));
                 }
 
-                let frame = Vp8Decoder::decode_frame((&mut self.r).take(next_chunk_size))?;
+                let vp8_slice = self.r.take_slice(next_chunk_size as usize)?;
+                let frame = Vp8Decoder::decode_frame(vp8_slice)?;
 
                 let mut rgba_frame = vec![0; frame_width as usize * frame_height as usize * 4];
                 frame.fill_rgba(&mut rgba_frame, self.webp_decode_options.lossy_upsampling);
@@ -910,25 +905,17 @@ impl<R: BufRead + Seek> WebPDecoder<R> {
     }
 }
 
-pub(crate) fn range_reader<R: BufRead + Seek>(
-    mut r: R,
-    range: Range<u64>,
-) -> Result<impl BufRead, DecodingError> {
-    r.seek(io::SeekFrom::Start(range.start))?;
-    Ok(r.take(range.end - range.start))
-}
-
-pub(crate) fn read_fourcc<R: BufRead>(mut r: R) -> Result<WebPRiffChunk, DecodingError> {
+pub(crate) fn read_fourcc(r: &mut SliceReader) -> Result<WebPRiffChunk, DecodingError> {
     let mut chunk_fourcc = [0; 4];
     r.read_exact(&mut chunk_fourcc)?;
     Ok(WebPRiffChunk::from_fourcc(chunk_fourcc))
 }
 
-pub(crate) fn read_chunk_header<R: BufRead>(
-    mut r: R,
+pub(crate) fn read_chunk_header(
+    r: &mut SliceReader,
 ) -> Result<(WebPRiffChunk, u64, u64), DecodingError> {
-    let chunk = read_fourcc(&mut r)?;
-    let chunk_size = r.read_u32::<LittleEndian>()?;
+    let chunk = read_fourcc(r)?;
+    let chunk_size = r.read_u32_le()?;
     let chunk_size_rounded = chunk_size.saturating_add(chunk_size & 1);
     Ok((chunk, chunk_size.into(), chunk_size_rounded.into()))
 }
@@ -949,8 +936,7 @@ pub(crate) fn read_chunk_header<R: BufRead>(
 /// # Ok::<(), zenwebp::DecodingError>(())
 /// ```
 pub fn decode_rgba(data: &[u8]) -> Result<(Vec<u8>, u32, u32), DecodingError> {
-    let cursor = std::io::Cursor::new(data);
-    let mut decoder = WebPDecoder::new(cursor)?;
+    let mut decoder = WebPDecoder::new(data)?;
     let (width, height) = decoder.dimensions();
     let output_size = decoder
         .output_buffer_size()
@@ -985,8 +971,7 @@ pub fn decode_rgba(data: &[u8]) -> Result<(Vec<u8>, u32, u32), DecodingError> {
 /// # Ok::<(), zenwebp::DecodingError>(())
 /// ```
 pub fn decode_rgb(data: &[u8]) -> Result<(Vec<u8>, u32, u32), DecodingError> {
-    let cursor = std::io::Cursor::new(data);
-    let mut decoder = WebPDecoder::new(cursor)?;
+    let mut decoder = WebPDecoder::new(data)?;
     let (width, height) = decoder.dimensions();
     let output_size = decoder
         .output_buffer_size()
@@ -1021,8 +1006,7 @@ pub fn decode_rgba_into(
     output: &mut [u8],
     stride_bytes: u32,
 ) -> Result<(u32, u32), DecodingError> {
-    let cursor = std::io::Cursor::new(data);
-    let mut decoder = WebPDecoder::new(cursor)?;
+    let mut decoder = WebPDecoder::new(data)?;
     let (width, height) = decoder.dimensions();
 
     // Validate buffer
@@ -1085,8 +1069,7 @@ pub fn decode_rgb_into(
     output: &mut [u8],
     stride_bytes: u32,
 ) -> Result<(u32, u32), DecodingError> {
-    let cursor = std::io::Cursor::new(data);
-    let mut decoder = WebPDecoder::new(cursor)?;
+    let mut decoder = WebPDecoder::new(data)?;
     let (width, height) = decoder.dimensions();
 
     // Validate buffer
@@ -1150,8 +1133,7 @@ pub struct ImageInfo {
 impl ImageInfo {
     /// Parse image information from WebP data.
     pub fn from_webp(data: &[u8]) -> Result<Self, DecodingError> {
-        let cursor = std::io::Cursor::new(data);
-        let mut decoder = WebPDecoder::new(cursor)?;
+        let decoder = WebPDecoder::new(data)?;
         let (width, height) = decoder.dimensions();
         Ok(Self {
             width,
@@ -1162,19 +1144,9 @@ impl ImageInfo {
     }
 }
 
-} // end of std_decoder module
-
-// Re-export public types from std_decoder
-#[cfg(feature = "std")]
-pub use std_decoder::{
-    decode_rgb, decode_rgb_into, decode_rgba, decode_rgba_into, ImageInfo, LoopCount,
-    UpsamplingMethod, WebPDecodeOptions, WebPDecoder,
-};
-
-
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 mod tests {
-    use super::std_decoder::*;
+    use super::*;
     const RGB_BPP: usize = 3;
 
     #[test]
@@ -1188,9 +1160,7 @@ mod tests {
             0x49, 0x54, 0x55, 0x50, 0x4c, 0x54, 0x59, 0x50, 0x45, 0x33, 0x37, 0x44, 0x4d, 0x46,
         ];
 
-        let data = std::io::Cursor::new(bytes);
-
-        let _ = WebPDecoder::new(data);
+        let _ = WebPDecoder::new(&bytes);
     }
 
     #[test]
@@ -1210,7 +1180,7 @@ mod tests {
         ];
 
         let mut data = [0; NUM_PIXELS];
-        let mut decoder = WebPDecoder::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut decoder = WebPDecoder::new(&bytes).unwrap();
         decoder.read_image(&mut data).unwrap();
 
         // All pixels are the same value
@@ -1233,7 +1203,7 @@ mod tests {
         ];
 
         let mut data = [0; NUM_PIXELS];
-        let mut decoder = WebPDecoder::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut decoder = WebPDecoder::new(&bytes).unwrap();
         decoder.read_image(&mut data).unwrap();
 
         // All pixels are the same value

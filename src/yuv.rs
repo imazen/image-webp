@@ -1,6 +1,9 @@
 //! Utilities for doing the YUV -> RGB conversion
 //! The images are encoded in the Y'CbCr format as detailed here: <https://en.wikipedia.org/wiki/YCbCr>
 //! so need to be converted to RGB to be displayed
+
+// Allow dead code when std is disabled - some functions are encoder-only
+#![cfg_attr(not(feature = "std"), allow(dead_code))]
 //! To do the YUV -> RGB conversion we need to first decide how to map the yuv values to the pixels
 //! The y buffer is the same size as the pixel buffer so that maps 1-1 but the
 //! u and v buffers are half the size of the pixel buffer so we need to scale it up
@@ -407,10 +410,10 @@ pub(crate) fn fill_rgb_buffer_simple<const BPP: usize>(
 ) {
     let u_row_twice_iter = u_buffer
         .chunks_exact(buffer_width / 2)
-        .flat_map(|n| std::iter::repeat_n(n, 2));
+        .flat_map(|n| core::iter::repeat_n(n, 2));
     let v_row_twice_iter = v_buffer
         .chunks_exact(buffer_width / 2)
-        .flat_map(|n| std::iter::repeat_n(n, 2));
+        .flat_map(|n| core::iter::repeat_n(n, 2));
 
     for (((row, y_row), u_row), v_row) in buffer
         .chunks_exact_mut(width * BPP)
@@ -851,12 +854,15 @@ pub(crate) fn convert_image_y<const BPP: usize>(
 // this is converted to 16 bit fixed point by multiplying by 2^16
 // and shifting back
 
+// Encoder-only functions below (used when std feature is enabled)
+#[cfg_attr(not(feature = "std"), allow(dead_code))]
 fn rgb_to_y(rgb: &[u8]) -> u8 {
     let luma = 16839 * i32::from(rgb[0]) + 33059 * i32::from(rgb[1]) + 6420 * i32::from(rgb[2]);
     ((luma + YUV_HALF + (16 << YUV_FIX)) >> YUV_FIX) as u8
 }
 
 // get the average of the four surrounding pixels
+#[cfg_attr(not(feature = "std"), allow(dead_code))]
 fn rgb_to_u_avg(rgb1: &[u8], rgb2: &[u8], rgb3: &[u8], rgb4: &[u8]) -> u8 {
     let u1 = rgb_to_u_raw(rgb1);
     let u2 = rgb_to_u_raw(rgb2);
@@ -868,6 +874,7 @@ fn rgb_to_u_avg(rgb1: &[u8], rgb2: &[u8], rgb3: &[u8], rgb4: &[u8]) -> u8 {
 }
 
 // get the average of the four surrounding pixels
+#[cfg_attr(not(feature = "std"), allow(dead_code))]
 fn rgb_to_v_avg(rgb1: &[u8], rgb2: &[u8], rgb3: &[u8], rgb4: &[u8]) -> u8 {
     let v1 = rgb_to_v_raw(rgb1);
     let v2 = rgb_to_v_raw(rgb2);
@@ -878,12 +885,14 @@ fn rgb_to_v_avg(rgb1: &[u8], rgb2: &[u8], rgb3: &[u8], rgb4: &[u8]) -> u8 {
     ((v1 + v2 + v3 + v4 + (YUV_HALF << 2)) >> (YUV_FIX + 2)) as u8
 }
 
+#[cfg_attr(not(feature = "std"), allow(dead_code))]
 fn rgb_to_u_raw(rgb: &[u8]) -> i32 {
     -9719 * i32::from(rgb[0]) - 19081 * i32::from(rgb[1])
         + 28800 * i32::from(rgb[2])
         + (128 << YUV_FIX)
 }
 
+#[cfg_attr(not(feature = "std"), allow(dead_code))]
 fn rgb_to_v_raw(rgb: &[u8]) -> i32 {
     28800 * i32::from(rgb[0]) - 24116 * i32::from(rgb[1]) - 4684 * i32::from(rgb[2])
         + (128 << YUV_FIX)

@@ -3,6 +3,9 @@
 //!
 //! Mostly common constants and types
 
+// Allow dead code when std is disabled - some types are encoder-only
+#![cfg_attr(not(feature = "std"), allow(dead_code))]
+
 use alloc::vec::Vec;
 
 /// A decoded or encoded VP8 frame containing YUV data.
@@ -752,6 +755,7 @@ pub(crate) const AC_QUANT: [i16; 128] = [
 
 pub(crate) const ZIGZAG: [u8; 16] = [0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15];
 
+#[cfg(feature = "std")]
 use crate::vp8_cost::{MatrixType, VP8Matrix};
 
 #[derive(Clone, Default)]
@@ -770,33 +774,47 @@ pub(crate) struct Segment {
     pub(crate) quantizer_level: i8,
     pub(crate) loopfilter_level: i8,
 
+    // Encoder-specific fields (requires std feature)
+    #[cfg(feature = "std")]
     /// The quantization index (0-127) for this segment
     #[allow(dead_code)] // Stored for debugging/info purposes
     pub(crate) quant_index: u8,
 
+    #[cfg(feature = "std")]
     // Quantization matrices for trellis optimization
     pub(crate) y1_matrix: Option<VP8Matrix>,
+    #[cfg(feature = "std")]
     pub(crate) y2_matrix: Option<VP8Matrix>,
+    #[cfg(feature = "std")]
     pub(crate) uv_matrix: Option<VP8Matrix>,
 
+    #[cfg(feature = "std")]
     // Lambda values for trellis quantization (scaled by 256 for fixed-point)
     // Computed as: lambda = (scale * q^2) where q is the AC quantizer
     pub(crate) lambda_trellis_i4: u32,
+    #[cfg(feature = "std")]
     pub(crate) lambda_trellis_i16: u32,
+    #[cfg(feature = "std")]
     pub(crate) lambda_trellis_uv: u32,
 
+    #[cfg(feature = "std")]
     // Lambda values for RD mode selection
     // These control rate-distortion trade-off in mode decisions
     pub(crate) lambda_i16: u32,
+    #[cfg(feature = "std")]
     pub(crate) lambda_i4: u32,
+    #[cfg(feature = "std")]
     pub(crate) lambda_uv: u32,
+    #[cfg(feature = "std")]
     pub(crate) lambda_mode: u32,
 
+    #[cfg(feature = "std")]
     // Spectral distortion weight (tlambda)
     // Controls how much TDisto affects mode selection
     pub(crate) tlambda: u32,
 }
 
+#[cfg(feature = "std")]
 impl Segment {
     /// Initialize quantization matrices and trellis lambdas from the quantizer values
     pub(crate) fn init_matrices(&mut self) {

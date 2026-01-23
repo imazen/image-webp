@@ -10,8 +10,8 @@ use byteorder_lite::WriteBytesExt;
 use byteorder_lite::LittleEndian;
 
 use crate::transform;
-use crate::vp8_common::Frame;
 use crate::vp8_arithmetic_encoder::ArithmeticEncoder;
+use crate::vp8_common::Frame;
 use crate::vp8_common::*;
 use crate::vp8_cost::{
     self, analyze_image, assign_segments_kmeans, compute_segment_quant, estimate_dc16_cost,

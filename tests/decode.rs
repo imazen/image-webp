@@ -47,8 +47,7 @@ fn reference_test_with_options(
 ) {
     // Prepare WebP decoder
     let contents = std::fs::read(format!("tests/images/{file}.webp")).unwrap();
-    let mut decoder =
-        zenwebp::WebPDecoder::new_with_options(Cursor::new(contents), options).unwrap();
+    let mut decoder = zenwebp::WebPDecoder::new_with_options(&contents, options).unwrap();
     let (width, height) = decoder.dimensions();
 
     // Decode reference PNG

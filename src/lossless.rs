@@ -2,8 +2,11 @@
 //!
 //! [Lossless spec](https://developers.google.com/speed/webp/docs/webp_lossless_bitstream_specification)
 
-use std::io::BufRead;
-use std::mem;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::mem;
+
+use crate::slice_reader::SliceReader;
 
 use crate::decoder::DecodingError;
 use crate::lossless_transform::{
@@ -61,19 +64,19 @@ const NUM_TRANSFORM_TYPES: usize = 4;
 
 //Decodes lossless WebP images
 #[derive(Debug)]
-pub(crate) struct LosslessDecoder<R> {
-    bit_reader: BitReader<R>,
+pub(crate) struct LosslessDecoder<'a> {
+    bit_reader: BitReader<'a>,
     transforms: [Option<TransformType>; NUM_TRANSFORM_TYPES],
     transform_order: Vec<u8>,
     width: u16,
     height: u16,
 }
 
-impl<R: BufRead> LosslessDecoder<R> {
+impl<'a> LosslessDecoder<'a> {
     /// Create a new decoder
-    pub(crate) const fn new(r: R) -> Self {
+    pub(crate) fn new(data: &'a [u8]) -> Self {
         Self {
-            bit_reader: BitReader::new(r),
+            bit_reader: BitReader::new(SliceReader::new(data)),
             transforms: [None, None, None, None],
             transform_order: Vec::new(),
             width: 0,
@@ -639,7 +642,7 @@ impl<R: BufRead> LosslessDecoder<R> {
 
     /// Gets the copy distance from the prefix code and bitstream
     fn get_copy_distance(
-        bit_reader: &mut BitReader<R>,
+        bit_reader: &mut BitReader<'_>,
         prefix_code: u16,
     ) -> Result<usize, DecodingError> {
         if prefix_code < 4 {
@@ -716,14 +719,14 @@ impl ColorCache {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct BitReader<R> {
-    reader: R,
+pub(crate) struct BitReader<'a> {
+    reader: SliceReader<'a>,
     buffer: u64,
     nbits: u8,
 }
 
-impl<R: BufRead> BitReader<R> {
-    const fn new(reader: R) -> Self {
+impl<'a> BitReader<'a> {
+    fn new(reader: SliceReader<'a>) -> Self {
         Self {
             reader,
             buffer: 0,
@@ -738,7 +741,7 @@ impl<R: BufRead> BitReader<R> {
     pub(crate) fn fill(&mut self) -> Result<(), DecodingError> {
         debug_assert!(self.nbits < 64);
 
-        let mut buf = self.reader.fill_buf()?;
+        let mut buf = self.reader.fill_buf();
         if buf.len() >= 8 {
             let lookahead = u64::from_le_bytes(buf[..8].try_into().unwrap());
             self.reader.consume(usize::from((63 - self.nbits) / 8));
@@ -749,7 +752,7 @@ impl<R: BufRead> BitReader<R> {
                 self.buffer |= u64::from(buf[0]) << self.nbits;
                 self.nbits += 8;
                 self.reader.consume(1);
-                buf = self.reader.fill_buf()?;
+                buf = self.reader.fill_buf();
             }
         }
 
@@ -798,14 +801,14 @@ impl<R: BufRead> BitReader<R> {
 #[cfg(test)]
 mod test {
 
-    use std::io::Cursor;
-
     use super::BitReader;
+    use crate::slice_reader::SliceReader;
 
     #[test]
     fn bit_read_test() {
         //10011100 01000001 11100001
-        let mut bit_reader = BitReader::new(Cursor::new(vec![0x9C, 0x41, 0xE1]));
+        let data = [0x9C, 0x41, 0xE1];
+        let mut bit_reader = BitReader::new(SliceReader::new(&data));
 
         assert_eq!(bit_reader.read_bits::<u8>(3).unwrap(), 4); //100
         assert_eq!(bit_reader.read_bits::<u8>(2).unwrap(), 3); //11
@@ -817,7 +820,8 @@ mod test {
     #[test]
     fn bit_read_error_test() {
         //01101010
-        let mut bit_reader = BitReader::new(Cursor::new(vec![0x6A]));
+        let data = [0x6A];
+        let mut bit_reader = BitReader::new(SliceReader::new(&data));
 
         assert_eq!(bit_reader.read_bits::<u8>(3).unwrap(), 2); //010
         assert_eq!(bit_reader.read_bits::<u8>(5).unwrap(), 13); //01101

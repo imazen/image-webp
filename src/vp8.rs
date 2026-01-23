@@ -14,11 +14,14 @@
 #![allow(clippy::needless_range_loop)]
 #![allow(clippy::collapsible_else_if)]
 
-use byteorder_lite::{LittleEndian, ReadBytesExt};
-use std::default::Default;
-use std::io::Read;
+use alloc::boxed::Box;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::array;
+use core::default::Default;
 
 use crate::decoder::{DecodingError, UpsamplingMethod};
+use crate::slice_reader::SliceReader;
 use crate::vp8_common::*;
 use crate::vp8_prediction::*;
 use crate::yuv;
@@ -678,8 +681,8 @@ impl Frame {
 /// VP8 Decoder
 ///
 /// Only decodes keyframes
-pub struct Vp8Decoder<R> {
-    r: R,
+pub struct Vp8Decoder<'a> {
+    r: SliceReader<'a>,
     b: VP8HeaderBitReader,
 
     mbwidth: u16,
@@ -739,10 +742,11 @@ pub struct Vp8Decoder<R> {
     coeff_blocks: [i32; 384],
 }
 
-impl<R: Read> Vp8Decoder<R> {
+impl<'a> Vp8Decoder<'a> {
     /// Create a new decoder.
-    /// The reader must present a raw vp8 bitstream to the decoder
-    fn new(r: R) -> Self {
+    /// The data must be a raw vp8 bitstream
+    pub(crate) fn new(data: &'a [u8]) -> Self {
+        let r = SliceReader::new(data);
         let f = Frame::default();
 
         Self {
@@ -756,7 +760,7 @@ impl<R: Read> Vp8Decoder<R> {
             frame: f,
             segments_enabled: false,
             segments_update_map: false,
-            segment: std::array::from_fn(|_| Segment::default()),
+            segment: array::from_fn(|_| Segment::default()),
 
             loop_filter_adjustments_enabled: false,
             ref_delta: [0; 4],
@@ -831,6 +835,8 @@ impl<R: Read> Vp8Decoder<R> {
     }
 
     fn init_partitions(&mut self, n: usize) -> Result<(), DecodingError> {
+        use byteorder_lite::{ByteOrder, LittleEndian};
+
         let mut all_data = Vec::new();
         let mut boundaries = Vec::with_capacity(n);
 
@@ -839,10 +845,7 @@ impl<R: Read> Vp8Decoder<R> {
             self.r.read_exact(sizes.as_mut_slice())?;
 
             for s in sizes.chunks(3) {
-                let size = { s }
-                    .read_u24::<LittleEndian>()
-                    .expect("Reading from &[u8] can't fail and the chunk is complete")
-                    as usize;
+                let size = LittleEndian::read_u24(s) as usize;
 
                 let start = all_data.len();
                 all_data.resize(start + size, 0);
@@ -964,12 +967,12 @@ impl<R: Read> Vp8Decoder<R> {
     }
 
     fn read_frame_header(&mut self) -> Result<(), DecodingError> {
-        let tag = self.r.read_u24::<LittleEndian>()?;
+        let tag = self.r.read_u24_le()?;
 
         let keyframe = tag & 1 == 0;
         if !keyframe {
             return Err(DecodingError::UnsupportedFeature(
-                "Non-keyframe frames".to_owned(),
+                "Non-keyframe frames".into(),
             ));
         }
 
@@ -985,8 +988,8 @@ impl<R: Read> Vp8Decoder<R> {
             return Err(DecodingError::Vp8MagicInvalid(tag));
         }
 
-        let w = self.r.read_u16::<LittleEndian>()?;
-        let h = self.r.read_u16::<LittleEndian>()?;
+        let w = self.r.read_u16_le()?;
+        let h = self.r.read_u16_le()?;
 
         self.frame.width = w & 0x3FFF;
         self.frame.height = h & 0x3FFF;
@@ -1936,8 +1939,8 @@ impl<R: Read> Vp8Decoder<R> {
     }
 
     /// Decodes the current frame
-    pub fn decode_frame(r: R) -> Result<Frame, DecodingError> {
-        let decoder = Self::new(r);
+    pub fn decode_frame(data: &'a [u8]) -> Result<Frame, DecodingError> {
+        let decoder = Self::new(data);
         decoder.decode_frame_()
     }
 

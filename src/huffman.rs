@@ -1,4 +1,5 @@
-use std::io::BufRead;
+use alloc::vec;
+use alloc::vec::Vec;
 
 use crate::decoder::DecodingError;
 use crate::lossless::BitReader;
@@ -189,11 +190,11 @@ impl HuffmanTree {
     }
 
     #[inline(never)]
-    fn read_symbol_slowpath<R: BufRead>(
+    fn read_symbol_slowpath(
         secondary_table: &[u16],
         v: u16,
         primary_table_entry: u16,
-        bit_reader: &mut BitReader<R>,
+        bit_reader: &mut BitReader<'_>,
     ) -> Result<u16, DecodingError> {
         let length = primary_table_entry >> 12;
         let mask = (1 << (length - MAX_TABLE_BITS as u16)) - 1;
@@ -208,10 +209,7 @@ impl HuffmanTree {
     ///
     /// You must call call `bit_reader.fill()` before calling this function or it may erroroneosly
     /// detect the end of the stream and return a bitstream error.
-    pub(crate) fn read_symbol<R: BufRead>(
-        &self,
-        bit_reader: &mut BitReader<R>,
-    ) -> Result<u16, DecodingError> {
+    pub(crate) fn read_symbol(&self, bit_reader: &mut BitReader<'_>) -> Result<u16, DecodingError> {
         match &self.0 {
             HuffmanTreeInner::Tree {
                 primary_table,
@@ -235,7 +233,7 @@ impl HuffmanTree {
     ///
     /// Returns a tuple of the codelength and symbol value. This function may return wrong
     /// information if there aren't enough bits in the bit reader to read the next symbol.
-    pub(crate) fn peek_symbol<R: BufRead>(&self, bit_reader: &BitReader<R>) -> Option<(u8, u16)> {
+    pub(crate) fn peek_symbol(&self, bit_reader: &BitReader<'_>) -> Option<(u8, u16)> {
         match &self.0 {
             HuffmanTreeInner::Tree {
                 primary_table,
