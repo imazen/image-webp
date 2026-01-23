@@ -80,8 +80,7 @@ impl<'a> VP8BitReader<'a> {
                 // Optimization: If we have at least 8 bytes, read u64 directly.
                 if self.buf.len() >= 8 {
                     // Read 8 bytes as Big Endian to match the shift-accumulation logic
-                    let in_bits_full =
-                        u64::from_be_bytes(self.buf[..8].try_into().unwrap());
+                    let in_bits_full = u64::from_be_bytes(self.buf[..8].try_into().unwrap());
                     // We want the first 7 bytes - shift right by 8 to drop last byte
                     bits = in_bits_full >> 8;
                 } else {
@@ -228,7 +227,11 @@ impl<'a> VP8BitReader<'a> {
     /// The tree uses bit 0x80 to indicate leaf values.
     #[inline]
     #[allow(dead_code)]
-    pub fn read_tree(&mut self, tree: &[crate::vp8::TreeNode], mut node: crate::vp8::TreeNode) -> i8 {
+    pub fn read_tree(
+        &mut self,
+        tree: &[crate::vp8::TreeNode],
+        mut node: crate::vp8::TreeNode,
+    ) -> i8 {
         loop {
             let prob = node.prob;
             let b = self.get_bit(prob) != 0;
@@ -552,8 +555,11 @@ impl<'a> PartitionReader<'a> {
             #[cfg(target_pointer_width = "64")]
             {
                 if remaining >= 8 {
-                    let in_bits_full =
-                        u64::from_be_bytes(self.data[self.state.pos..self.state.pos + 8].try_into().unwrap());
+                    let in_bits_full = u64::from_be_bytes(
+                        self.data[self.state.pos..self.state.pos + 8]
+                            .try_into()
+                            .unwrap(),
+                    );
                     bits = in_bits_full >> 8;
                 } else {
                     let mut in_bits: u64 = 0;
@@ -632,7 +638,11 @@ impl<'a> PartitionReader<'a> {
 
     #[inline(always)]
     #[allow(dead_code)]
-    pub fn read_tree(&mut self, tree: &[crate::vp8::TreeNode], mut node: crate::vp8::TreeNode) -> i8 {
+    pub fn read_tree(
+        &mut self,
+        tree: &[crate::vp8::TreeNode],
+        mut node: crate::vp8::TreeNode,
+    ) -> i8 {
         loop {
             let prob = node.prob;
             let b = self.get_bit(prob) != 0;
@@ -820,7 +830,9 @@ mod benchmarks {
             let mut res = decoder.start_accumulated_result();
             let mut sum = 0u32;
             for i in 0..1000 {
-                sum += decoder.read_bool(probs[i % probs.len()]).or_accumulate(&mut res) as u32;
+                sum += decoder
+                    .read_bool(probs[i % probs.len()])
+                    .or_accumulate(&mut res) as u32;
             }
             test::black_box(sum)
         });

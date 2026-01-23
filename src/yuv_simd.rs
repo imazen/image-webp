@@ -4,7 +4,7 @@
 //! Processes 32 pixels at a time with SIMD RGB interleaving.
 
 #[cfg(target_arch = "x86_64")]
-use archmage::{arcane, Has128BitSimd, Sse41Token, SimdToken};
+use archmage::{arcane, Has128BitSimd, SimdToken, Sse41Token};
 
 #[cfg(target_arch = "x86_64")]
 use safe_unaligned_simd::x86_64 as simd_mem;
@@ -116,10 +116,7 @@ fn pack_and_store_rgba(
     let ba = _mm_unpackhi_epi8(rb, ga);
     let rgba_lo = _mm_unpacklo_epi16(rg, ba);
     let rgba_hi = _mm_unpackhi_epi16(rg, ba);
-    simd_mem::_mm_storeu_si128(
-        <&mut [u8; 16]>::try_from(&mut dst[..16]).unwrap(),
-        rgba_lo,
-    );
+    simd_mem::_mm_storeu_si128(<&mut [u8; 16]>::try_from(&mut dst[..16]).unwrap(), rgba_lo);
     simd_mem::_mm_storeu_si128(
         <&mut [u8; 16]>::try_from(&mut dst[16..32]).unwrap(),
         rgba_hi,
@@ -223,30 +220,12 @@ fn yuv444_to_rgb_32(
         planar_to_24b(_token, rgb0, rgb1, rgb2, rgb3, rgb4, rgb5);
 
     // Store 96 bytes
-    simd_mem::_mm_storeu_si128(
-        <&mut [u8; 16]>::try_from(&mut dst[..16]).unwrap(),
-        out0,
-    );
-    simd_mem::_mm_storeu_si128(
-        <&mut [u8; 16]>::try_from(&mut dst[16..32]).unwrap(),
-        out1,
-    );
-    simd_mem::_mm_storeu_si128(
-        <&mut [u8; 16]>::try_from(&mut dst[32..48]).unwrap(),
-        out2,
-    );
-    simd_mem::_mm_storeu_si128(
-        <&mut [u8; 16]>::try_from(&mut dst[48..64]).unwrap(),
-        out3,
-    );
-    simd_mem::_mm_storeu_si128(
-        <&mut [u8; 16]>::try_from(&mut dst[64..80]).unwrap(),
-        out4,
-    );
-    simd_mem::_mm_storeu_si128(
-        <&mut [u8; 16]>::try_from(&mut dst[80..96]).unwrap(),
-        out5,
-    );
+    simd_mem::_mm_storeu_si128(<&mut [u8; 16]>::try_from(&mut dst[..16]).unwrap(), out0);
+    simd_mem::_mm_storeu_si128(<&mut [u8; 16]>::try_from(&mut dst[16..32]).unwrap(), out1);
+    simd_mem::_mm_storeu_si128(<&mut [u8; 16]>::try_from(&mut dst[32..48]).unwrap(), out2);
+    simd_mem::_mm_storeu_si128(<&mut [u8; 16]>::try_from(&mut dst[48..64]).unwrap(), out3);
+    simd_mem::_mm_storeu_si128(<&mut [u8; 16]>::try_from(&mut dst[64..80]).unwrap(), out4);
+    simd_mem::_mm_storeu_si128(<&mut [u8; 16]>::try_from(&mut dst[80..96]).unwrap(), out5);
 }
 
 /// Convert 32 YUV420 pixels (32 Y, 16 U, 16 V) to 96 bytes of RGB.
@@ -294,30 +273,12 @@ fn yuv420_to_rgb_32(
         planar_to_24b(_token, rgb0, rgb1, rgb2, rgb3, rgb4, rgb5);
 
     // Store 96 bytes
-    simd_mem::_mm_storeu_si128(
-        <&mut [u8; 16]>::try_from(&mut dst[..16]).unwrap(),
-        out0,
-    );
-    simd_mem::_mm_storeu_si128(
-        <&mut [u8; 16]>::try_from(&mut dst[16..32]).unwrap(),
-        out1,
-    );
-    simd_mem::_mm_storeu_si128(
-        <&mut [u8; 16]>::try_from(&mut dst[32..48]).unwrap(),
-        out2,
-    );
-    simd_mem::_mm_storeu_si128(
-        <&mut [u8; 16]>::try_from(&mut dst[48..64]).unwrap(),
-        out3,
-    );
-    simd_mem::_mm_storeu_si128(
-        <&mut [u8; 16]>::try_from(&mut dst[64..80]).unwrap(),
-        out4,
-    );
-    simd_mem::_mm_storeu_si128(
-        <&mut [u8; 16]>::try_from(&mut dst[80..96]).unwrap(),
-        out5,
-    );
+    simd_mem::_mm_storeu_si128(<&mut [u8; 16]>::try_from(&mut dst[..16]).unwrap(), out0);
+    simd_mem::_mm_storeu_si128(<&mut [u8; 16]>::try_from(&mut dst[16..32]).unwrap(), out1);
+    simd_mem::_mm_storeu_si128(<&mut [u8; 16]>::try_from(&mut dst[32..48]).unwrap(), out2);
+    simd_mem::_mm_storeu_si128(<&mut [u8; 16]>::try_from(&mut dst[48..64]).unwrap(), out3);
+    simd_mem::_mm_storeu_si128(<&mut [u8; 16]>::try_from(&mut dst[64..80]).unwrap(), out4);
+    simd_mem::_mm_storeu_si128(<&mut [u8; 16]>::try_from(&mut dst[80..96]).unwrap(), out5);
 }
 
 /// Scalar fallback for YUV to RGB conversion (single pixel).
@@ -565,28 +526,16 @@ fn upsample_32_pixels(
     let t_b = _mm_avg_epu8(b, diag2);
     let t_1 = _mm_unpacklo_epi8(t_a, t_b);
     let t_2 = _mm_unpackhi_epi8(t_a, t_b);
-    simd_mem::_mm_storeu_si128(
-        <&mut [u8; 16]>::try_from(&mut out[..16]).unwrap(),
-        t_1,
-    );
-    simd_mem::_mm_storeu_si128(
-        <&mut [u8; 16]>::try_from(&mut out[16..32]).unwrap(),
-        t_2,
-    );
+    simd_mem::_mm_storeu_si128(<&mut [u8; 16]>::try_from(&mut out[..16]).unwrap(), t_1);
+    simd_mem::_mm_storeu_si128(<&mut [u8; 16]>::try_from(&mut out[16..32]).unwrap(), t_2);
 
     // Pack for bottom row: roles of diag1/diag2 swapped
     let b_a = _mm_avg_epu8(c, diag2);
     let b_b = _mm_avg_epu8(d, diag1);
     let b_1 = _mm_unpacklo_epi8(b_a, b_b);
     let b_2 = _mm_unpackhi_epi8(b_a, b_b);
-    simd_mem::_mm_storeu_si128(
-        <&mut [u8; 16]>::try_from(&mut out[64..80]).unwrap(),
-        b_1,
-    );
-    simd_mem::_mm_storeu_si128(
-        <&mut [u8; 16]>::try_from(&mut out[80..96]).unwrap(),
-        b_2,
-    );
+    simd_mem::_mm_storeu_si128(<&mut [u8; 16]>::try_from(&mut out[64..80]).unwrap(), b_1);
+    simd_mem::_mm_storeu_si128(<&mut [u8; 16]>::try_from(&mut out[80..96]).unwrap(), b_2);
 }
 
 /// Process 8 pixel pairs with fancy upsampling and YUV->RGB conversion.
@@ -682,18 +631,9 @@ fn fancy_upsample_8_pairs_inner(
     let (out0, out1, out2, _, _, _) = planar_to_24b(_token, rgb0, rgb1, rgb2, rgb3, rgb4, rgb5);
 
     // Store 48 bytes (16 RGB pixels)
-    simd_mem::_mm_storeu_si128(
-        <&mut [u8; 16]>::try_from(&mut rgb[..16]).unwrap(),
-        out0,
-    );
-    simd_mem::_mm_storeu_si128(
-        <&mut [u8; 16]>::try_from(&mut rgb[16..32]).unwrap(),
-        out1,
-    );
-    simd_mem::_mm_storeu_si128(
-        <&mut [u8; 16]>::try_from(&mut rgb[32..48]).unwrap(),
-        out2,
-    );
+    simd_mem::_mm_storeu_si128(<&mut [u8; 16]>::try_from(&mut rgb[..16]).unwrap(), out0);
+    simd_mem::_mm_storeu_si128(<&mut [u8; 16]>::try_from(&mut rgb[16..32]).unwrap(), out1);
+    simd_mem::_mm_storeu_si128(<&mut [u8; 16]>::try_from(&mut rgb[32..48]).unwrap(), out2);
 }
 
 #[cfg(test)]
@@ -787,14 +727,25 @@ mod tests {
         let v_row_2: [u8; 9] = [149, 23, 86, 100, 120, 55, 75, 95, 110];
 
         let mut rgb_simd = [0u8; 48];
-        fancy_upsample_8_pairs(&y_row, &u_row_1, &u_row_2, &v_row_1, &v_row_2, &mut rgb_simd);
+        fancy_upsample_8_pairs(
+            &y_row,
+            &u_row_1,
+            &u_row_2,
+            &v_row_1,
+            &v_row_2,
+            &mut rgb_simd,
+        );
 
         let mut rgb_scalar = [0u8; 48];
         for i in 0..8 {
-            let u_diag1 = get_fancy_chroma_value(u_row_1[i], u_row_1[i + 1], u_row_2[i], u_row_2[i + 1]);
-            let v_diag1 = get_fancy_chroma_value(v_row_1[i], v_row_1[i + 1], v_row_2[i], v_row_2[i + 1]);
-            let u_diag2 = get_fancy_chroma_value(u_row_1[i + 1], u_row_1[i], u_row_2[i + 1], u_row_2[i]);
-            let v_diag2 = get_fancy_chroma_value(v_row_1[i + 1], v_row_1[i], v_row_2[i + 1], v_row_2[i]);
+            let u_diag1 =
+                get_fancy_chroma_value(u_row_1[i], u_row_1[i + 1], u_row_2[i], u_row_2[i + 1]);
+            let v_diag1 =
+                get_fancy_chroma_value(v_row_1[i], v_row_1[i + 1], v_row_2[i], v_row_2[i + 1]);
+            let u_diag2 =
+                get_fancy_chroma_value(u_row_1[i + 1], u_row_1[i], u_row_2[i + 1], u_row_2[i]);
+            let v_diag2 =
+                get_fancy_chroma_value(v_row_1[i + 1], v_row_1[i], v_row_2[i + 1], v_row_2[i]);
 
             let (r1, g1, b1) = yuv_to_rgb_scalar(y_row[i * 2], u_diag1, v_diag1);
             let (r2, g2, b2) = yuv_to_rgb_scalar(y_row[i * 2 + 1], u_diag2, v_diag2);
