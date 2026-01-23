@@ -2,9 +2,13 @@
 //!
 //! This module provides optimized SSE computation for block distortion
 //! measurement, similar to libwebp's SSE4x4_SSE2.
+//!
+//! Uses archmage for safe SIMD intrinsics with token-based CPU feature verification.
 
 #[cfg(all(target_arch = "x86_64", feature = "unsafe-simd"))]
-use std::arch::x86_64::*;
+use archmage::{arcane, mem::sse2, HasSse2, SimdToken, Sse2Token};
+#[cfg(all(target_arch = "x86_64", feature = "unsafe-simd"))]
+use core::arch::x86_64::*;
 
 /// Compute Sum of Squared Errors between two 4x4 blocks
 ///
@@ -19,8 +23,10 @@ pub fn sse4x4(a: &[u8; 16], b: &[u8; 16]) -> u32 {
     }
 
     #[cfg(target_arch = "x86_64")]
-    unsafe {
-        sse4x4_sse2(a, b)
+    {
+        // SSE2 is baseline on x86_64, so summon always succeeds
+        let token = Sse2Token::summon().expect("SSE2 is baseline on x86_64");
+        sse4x4_sse2(token, a, b)
     }
 }
 
@@ -38,14 +44,14 @@ pub fn sse4x4_scalar(a: &[u8; 16], b: &[u8; 16]) -> u32 {
 
 /// SSE2 implementation of 4x4 block SSE
 #[cfg(all(target_arch = "x86_64", feature = "unsafe-simd"))]
-#[target_feature(enable = "sse2")]
+#[arcane]
 #[allow(dead_code)]
-unsafe fn sse4x4_sse2(a: &[u8; 16], b: &[u8; 16]) -> u32 {
+fn sse4x4_sse2(token: impl HasSse2 + Copy, a: &[u8; 16], b: &[u8; 16]) -> u32 {
     let zero = _mm_setzero_si128();
 
     // Load all 16 bytes at once
-    let a_bytes = _mm_loadu_si128(a.as_ptr() as *const __m128i);
-    let b_bytes = _mm_loadu_si128(b.as_ptr() as *const __m128i);
+    let a_bytes = sse2::_mm_loadu_si128(token, a);
+    let b_bytes = sse2::_mm_loadu_si128(token, b);
 
     // Unpack to 16-bit: low 8 bytes
     let a_lo = _mm_unpacklo_epi8(a_bytes, zero);
@@ -85,8 +91,9 @@ pub fn sse4x4_with_residual(src: &[u8; 16], pred: &[u8; 16], residual: &[i32; 16
     }
 
     #[cfg(target_arch = "x86_64")]
-    unsafe {
-        sse4x4_with_residual_sse2(src, pred, residual)
+    {
+        let token = Sse2Token::summon().expect("SSE2 is baseline on x86_64");
+        sse4x4_with_residual_sse2(token, src, pred, residual)
     }
 }
 
@@ -105,15 +112,20 @@ pub fn sse4x4_with_residual_scalar(src: &[u8; 16], pred: &[u8; 16], residual: &[
 
 /// SSE2 implementation of SSE with residual
 #[cfg(all(target_arch = "x86_64", feature = "unsafe-simd"))]
-#[target_feature(enable = "sse2")]
+#[arcane]
 #[allow(dead_code)]
-unsafe fn sse4x4_with_residual_sse2(src: &[u8; 16], pred: &[u8; 16], residual: &[i32; 16]) -> u32 {
+fn sse4x4_with_residual_sse2(
+    token: impl HasSse2 + Copy,
+    src: &[u8; 16],
+    pred: &[u8; 16],
+    residual: &[i32; 16],
+) -> u32 {
     let zero = _mm_setzero_si128();
     let max_255 = _mm_set1_epi16(255);
 
     // Load source and prediction
-    let src_bytes = _mm_loadu_si128(src.as_ptr() as *const __m128i);
-    let pred_bytes = _mm_loadu_si128(pred.as_ptr() as *const __m128i);
+    let src_bytes = sse2::_mm_loadu_si128(token, src);
+    let pred_bytes = sse2::_mm_loadu_si128(token, pred);
 
     // Unpack to 16-bit
     let src_lo = _mm_unpacklo_epi8(src_bytes, zero);
@@ -122,10 +134,10 @@ unsafe fn sse4x4_with_residual_sse2(src: &[u8; 16], pred: &[u8; 16], residual: &
     let pred_hi = _mm_unpackhi_epi8(pred_bytes, zero);
 
     // Load residuals (4 i32 values at a time) and pack to i16
-    let res0 = _mm_loadu_si128(residual.as_ptr() as *const __m128i);
-    let res1 = _mm_loadu_si128(residual.as_ptr().add(4) as *const __m128i);
-    let res2 = _mm_loadu_si128(residual.as_ptr().add(8) as *const __m128i);
-    let res3 = _mm_loadu_si128(residual.as_ptr().add(12) as *const __m128i);
+    let res0 = sse2::_mm_loadu_si128(token, <&[i32; 4]>::try_from(&residual[0..4]).unwrap());
+    let res1 = sse2::_mm_loadu_si128(token, <&[i32; 4]>::try_from(&residual[4..8]).unwrap());
+    let res2 = sse2::_mm_loadu_si128(token, <&[i32; 4]>::try_from(&residual[8..12]).unwrap());
+    let res3 = sse2::_mm_loadu_si128(token, <&[i32; 4]>::try_from(&residual[12..16]).unwrap());
 
     // Pack i32 to i16 (saturating)
     let res_lo = _mm_packs_epi32(res0, res1);
@@ -178,8 +190,9 @@ pub fn sse_16x16_luma(
     }
 
     #[cfg(target_arch = "x86_64")]
-    unsafe {
-        sse_16x16_luma_sse2(src_y, src_width, mbx, mby, pred)
+    {
+        let token = Sse2Token::summon().expect("SSE2 is baseline on x86_64");
+        sse_16x16_luma_sse2(token, src_y, src_width, mbx, mby, pred)
     }
 }
 
@@ -210,9 +223,10 @@ pub fn sse_16x16_luma_scalar(
 
 /// SSE2 implementation of 16x16 luma SSE
 #[cfg(all(target_arch = "x86_64", feature = "unsafe-simd"))]
-#[target_feature(enable = "sse2")]
+#[arcane]
 #[allow(dead_code)]
-unsafe fn sse_16x16_luma_sse2(
+fn sse_16x16_luma_sse2(
+    token: impl HasSse2 + Copy,
     src_y: &[u8],
     src_width: usize,
     mbx: usize,
@@ -229,8 +243,14 @@ unsafe fn sse_16x16_luma_sse2(
         let pred_row = (y + 1) * LUMA_STRIDE + 1;
 
         // Load 16 bytes from source and prediction
-        let src_bytes = _mm_loadu_si128(src_y.as_ptr().add(src_row) as *const __m128i);
-        let pred_bytes = _mm_loadu_si128(pred.as_ptr().add(pred_row) as *const __m128i);
+        let src_bytes = sse2::_mm_loadu_si128(
+            token,
+            <&[u8; 16]>::try_from(&src_y[src_row..][..16]).unwrap(),
+        );
+        let pred_bytes = sse2::_mm_loadu_si128(
+            token,
+            <&[u8; 16]>::try_from(&pred[pred_row..][..16]).unwrap(),
+        );
 
         // Unpack to 16-bit
         let src_lo = _mm_unpacklo_epi8(src_bytes, zero);
@@ -272,8 +292,9 @@ pub fn sse_8x8_chroma(
     }
 
     #[cfg(target_arch = "x86_64")]
-    unsafe {
-        sse_8x8_chroma_sse2(src_uv, src_width, mbx, mby, pred)
+    {
+        let token = Sse2Token::summon().expect("SSE2 is baseline on x86_64");
+        sse_8x8_chroma_sse2(token, src_uv, src_width, mbx, mby, pred)
     }
 }
 
@@ -304,9 +325,10 @@ pub fn sse_8x8_chroma_scalar(
 
 /// SSE2 implementation of 8x8 chroma SSE
 #[cfg(all(target_arch = "x86_64", feature = "unsafe-simd"))]
-#[target_feature(enable = "sse2")]
+#[arcane]
 #[allow(dead_code)]
-unsafe fn sse_8x8_chroma_sse2(
+fn sse_8x8_chroma_sse2(
+    token: impl HasSse2 + Copy,
     src_uv: &[u8],
     src_width: usize,
     mbx: usize,
@@ -323,8 +345,10 @@ unsafe fn sse_8x8_chroma_sse2(
         let pred_row = (y + 1) * CHROMA_STRIDE + 1;
 
         // Load 8 bytes from source and prediction (lower half of xmm register)
-        let src_bytes = _mm_loadl_epi64(src_uv.as_ptr().add(src_row) as *const __m128i);
-        let pred_bytes = _mm_loadl_epi64(pred.as_ptr().add(pred_row) as *const __m128i);
+        let src_bytes =
+            sse2::_mm_loadu_si64(token, <&[u8; 8]>::try_from(&src_uv[src_row..][..8]).unwrap());
+        let pred_bytes =
+            sse2::_mm_loadu_si64(token, <&[u8; 8]>::try_from(&pred[pred_row..][..8]).unwrap());
 
         // Unpack to 16-bit (only low 8 bytes are valid)
         let src_16 = _mm_unpacklo_epi8(src_bytes, zero);
@@ -400,33 +424,36 @@ pub fn t_transform(input: &[u8], stride: usize, w: &[u16; 16]) -> i32 {
     }
 
     #[cfg(target_arch = "x86_64")]
-    unsafe {
-        t_transform_sse2(input, stride, w)
+    {
+        let token = Sse2Token::summon().expect("SSE2 is baseline on x86_64");
+        t_transform_sse2(token, input, stride, w)
     }
 }
 
 /// SSE2 implementation of TTransform
 #[cfg(all(target_arch = "x86_64", feature = "unsafe-simd"))]
-#[target_feature(enable = "sse2")]
+#[arcane]
 #[allow(dead_code)]
-unsafe fn t_transform_sse2(input: &[u8], stride: usize, w: &[u16; 16]) -> i32 {
+fn t_transform_sse2(token: impl HasSse2 + Copy, input: &[u8], stride: usize, w: &[u16; 16]) -> i32 {
     let zero = _mm_setzero_si128();
 
     // Load 4 rows of 4 bytes each, expand to i16
     // Row 0
-    let row0 = _mm_cvtsi32_si128(*(input.as_ptr() as *const i32));
+    let row0 = sse2::_mm_loadu_si32(token, <&[u8; 4]>::try_from(&input[0..4]).unwrap());
     let row0_16 = _mm_unpacklo_epi8(row0, zero);
 
     // Row 1
-    let row1 = _mm_cvtsi32_si128(*(input.as_ptr().add(stride) as *const i32));
+    let row1 = sse2::_mm_loadu_si32(token, <&[u8; 4]>::try_from(&input[stride..][..4]).unwrap());
     let row1_16 = _mm_unpacklo_epi8(row1, zero);
 
     // Row 2
-    let row2 = _mm_cvtsi32_si128(*(input.as_ptr().add(stride * 2) as *const i32));
+    let row2 =
+        sse2::_mm_loadu_si32(token, <&[u8; 4]>::try_from(&input[stride * 2..][..4]).unwrap());
     let row2_16 = _mm_unpacklo_epi8(row2, zero);
 
     // Row 3
-    let row3 = _mm_cvtsi32_si128(*(input.as_ptr().add(stride * 3) as *const i32));
+    let row3 =
+        sse2::_mm_loadu_si32(token, <&[u8; 4]>::try_from(&input[stride * 3..][..4]).unwrap());
     let row3_16 = _mm_unpacklo_epi8(row3, zero);
 
     // Pack rows into format: [r0_0, r0_1, r0_2, r0_3, r1_0, r1_1, r1_2, r1_3]

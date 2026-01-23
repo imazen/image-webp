@@ -9,54 +9,8 @@ use std::arch::x86_64::*;
 #[cfg(target_arch = "x86")]
 use std::arch::x86::*;
 
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::OnceLock;
-
-// CPU feature detection cache
-static CPU_FEATURES: AtomicU8 = AtomicU8::new(0);
-
-// Function pointer types for dispatch
-type IdctFn = unsafe fn(&mut [i32]);
-type DctFn = unsafe fn(&mut [i32; 16]);
-
-// OnceLock for function pointer dispatch (faster than match on every call)
 #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-static IDCT_FN: OnceLock<IdctFn> = OnceLock::new();
-#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-static DCT_FN: OnceLock<DctFn> = OnceLock::new();
-
-const FEAT_UNINITIALIZED: u8 = 0;
-const FEAT_SSE2: u8 = 1;
-const FEAT_AVX2_FMA: u8 = 2;
-const FEAT_AVX512: u8 = 3;
-
-/// Detect CPU features and cache the result
-#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-fn detect_cpu_features() -> u8 {
-    let cached = CPU_FEATURES.load(Ordering::Relaxed);
-    if cached != FEAT_UNINITIALIZED {
-        return cached;
-    }
-
-    let features = if is_x86_feature_detected!("avx512f")
-        && is_x86_feature_detected!("avx512bw")
-        && is_x86_feature_detected!("avx512vl")
-    {
-        FEAT_AVX512
-    } else if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
-        FEAT_AVX2_FMA
-    } else {
-        FEAT_SSE2
-    };
-
-    CPU_FEATURES.store(features, Ordering::Relaxed);
-    features
-}
-
-#[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
-fn detect_cpu_features() -> u8 {
-    FEAT_SSE2
-}
+use archmage::{arcane, mem::sse2, HasSse2, SimdToken, Sse2Token};
 
 // =============================================================================
 // Public dispatch functions
@@ -66,14 +20,9 @@ fn detect_cpu_features() -> u8 {
 pub(crate) fn dct4x4_intrinsics(block: &mut [i32; 16]) {
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     {
-        let f = DCT_FN.get_or_init(|| {
-            match detect_cpu_features() {
-                FEAT_AVX512 => dct4x4_avx512,
-                FEAT_AVX2_FMA => dct4x4_avx2,
-                _ => dct4x4_sse2,
-            }
-        });
-        unsafe { f(block) }
+        // SSE2 is baseline on x86_64
+        let token = Sse2Token::summon().expect("SSE2 is baseline on x86_64");
+        dct4x4_sse2(token, block);
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
     {
@@ -87,14 +36,9 @@ pub(crate) fn idct4x4_intrinsics(block: &mut [i32]) {
     debug_assert!(block.len() >= 16);
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     {
-        let f = IDCT_FN.get_or_init(|| {
-            match detect_cpu_features() {
-                FEAT_AVX512 => idct4x4_avx512,
-                FEAT_AVX2_FMA => idct4x4_avx2,
-                _ => idct4x4_sse2,
-            }
-        });
-        unsafe { f(block) }
+        // SSE2 is baseline on x86_64
+        let token = Sse2Token::summon().expect("SSE2 is baseline on x86_64");
+        idct4x4_sse2(token, block);
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
     {
@@ -107,11 +51,9 @@ pub(crate) fn idct4x4_intrinsics(block: &mut [i32]) {
 pub(crate) fn dct4x4_two_intrinsics(block1: &mut [i32; 16], block2: &mut [i32; 16]) {
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     {
-        match detect_cpu_features() {
-            FEAT_AVX512 => unsafe { dct4x4_two_avx512(block1, block2) },
-            FEAT_AVX2_FMA => unsafe { dct4x4_two_avx2(block1, block2) },
-            _ => unsafe { dct4x4_two_sse2(block1, block2) },
-        }
+        // SSE2 is baseline on x86_64
+        let token = Sse2Token::summon().expect("SSE2 is baseline on x86_64");
+        dct4x4_two_sse2(token, block1, block2);
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
     {
@@ -127,8 +69,8 @@ pub(crate) fn dct4x4_two_intrinsics(block1: &mut [i32; 16], block2: &mut [i32; 1
 /// Forward DCT using SSE2 with i16 layout matching libwebp's FTransform
 /// Uses _mm_madd_epi16 for efficient multiply-accumulate
 #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-#[target_feature(enable = "sse2")]
-unsafe fn dct4x4_sse2(block: &mut [i32; 16]) {
+#[arcane]
+fn dct4x4_sse2(token: impl HasSse2 + Copy, block: &mut [i32; 16]) {
     // Convert i32 block to i16 and reorganize into libwebp's interleaved layout:
     // row01 = [r0c0, r0c1, r1c0, r1c1, r0c2, r0c3, r1c2, r1c3]
     // row23 = [r2c0, r2c1, r3c0, r3c1, r2c2, r2c3, r3c2, r3c3]
@@ -154,16 +96,16 @@ unsafe fn dct4x4_sse2(block: &mut [i32; 16]) {
     );
 
     // Forward transform pass 1 (rows)
-    let (v01, v32) = ftransform_pass1_i16(row01, row23);
+    let (v01, v32) = ftransform_pass1_i16(token, row01, row23);
 
     // Forward transform pass 2 (columns)
     let mut out16 = [0i16; 16];
-    ftransform_pass2_i16(&v01, &v32, &mut out16);
+    ftransform_pass2_i16(token, &v01, &v32, &mut out16);
 
     // Convert i16 output back to i32 using SIMD sign extension
     let zero = _mm_setzero_si128();
-    let out01 = _mm_loadu_si128(out16.as_ptr().add(0) as *const __m128i);
-    let out23 = _mm_loadu_si128(out16.as_ptr().add(8) as *const __m128i);
+    let out01 = sse2::_mm_loadu_si128(token, <&[i16; 8]>::try_from(&out16[0..8]).unwrap());
+    let out23 = sse2::_mm_loadu_si128(token, <&[i16; 8]>::try_from(&out16[8..16]).unwrap());
 
     // Sign extend i16 to i32
     let sign01 = _mm_cmpgt_epi16(zero, out01);
@@ -174,17 +116,17 @@ unsafe fn dct4x4_sse2(block: &mut [i32; 16]) {
     let out_2 = _mm_unpacklo_epi16(out23, sign23);
     let out_3 = _mm_unpackhi_epi16(out23, sign23);
 
-    _mm_storeu_si128(block.as_mut_ptr().add(0) as *mut __m128i, out_0);
-    _mm_storeu_si128(block.as_mut_ptr().add(4) as *mut __m128i, out_1);
-    _mm_storeu_si128(block.as_mut_ptr().add(8) as *mut __m128i, out_2);
-    _mm_storeu_si128(block.as_mut_ptr().add(12) as *mut __m128i, out_3);
+    sse2::_mm_storeu_si128(token, <&mut [i32; 4]>::try_from(&mut block[0..4]).unwrap(), out_0);
+    sse2::_mm_storeu_si128(token, <&mut [i32; 4]>::try_from(&mut block[4..8]).unwrap(), out_1);
+    sse2::_mm_storeu_si128(token, <&mut [i32; 4]>::try_from(&mut block[8..12]).unwrap(), out_2);
+    sse2::_mm_storeu_si128(token, <&mut [i32; 4]>::try_from(&mut block[12..16]).unwrap(), out_3);
 }
 
 /// FTransform Pass 1 - matches libwebp FTransformPass1_SSE2 exactly
 #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-#[target_feature(enable = "sse2")]
+#[arcane]
 #[inline]
-unsafe fn ftransform_pass1_i16(in01: __m128i, in23: __m128i) -> (__m128i, __m128i) {
+fn ftransform_pass1_i16(_token: impl HasSse2 + Copy, in01: __m128i, in23: __m128i) -> (__m128i, __m128i) {
     // Constants matching libwebp exactly
     let k937 = _mm_set1_epi32(937);
     let k1812 = _mm_set1_epi32(1812);
@@ -243,9 +185,9 @@ unsafe fn ftransform_pass1_i16(in01: __m128i, in23: __m128i) -> (__m128i, __m128
 
 /// FTransform Pass 2 - matches libwebp FTransformPass2_SSE2 exactly
 #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-#[target_feature(enable = "sse2")]
+#[arcane]
 #[inline]
-unsafe fn ftransform_pass2_i16(v01: &__m128i, v32: &__m128i, out: &mut [i16; 16]) {
+fn ftransform_pass2_i16(token: impl HasSse2 + Copy, v01: &__m128i, v32: &__m128i, out: &mut [i16; 16]) {
     let zero = _mm_setzero_si128();
     let seven = _mm_set1_epi16(7);
     let k5352_2217 = _mm_set_epi16(5352, 2217, 5352, 2217, 5352, 2217, 5352, 2217);
@@ -287,25 +229,25 @@ unsafe fn ftransform_pass2_i16(v01: &__m128i, v32: &__m128i, out: &mut [i16; 16]
     let d0_g1 = _mm_unpacklo_epi64(d0, g1);
     let d2_f3 = _mm_unpacklo_epi64(d2, f3);
 
-    _mm_storeu_si128(out.as_mut_ptr().add(0) as *mut __m128i, d0_g1);
-    _mm_storeu_si128(out.as_mut_ptr().add(8) as *mut __m128i, d2_f3);
+    sse2::_mm_storeu_si128(token, <&mut [i16; 8]>::try_from(&mut out[0..8]).unwrap(), d0_g1);
+    sse2::_mm_storeu_si128(token, <&mut [i16; 8]>::try_from(&mut out[8..16]).unwrap(), d2_f3);
 }
 
 /// Process two blocks at once
 #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-#[target_feature(enable = "sse2")]
+#[arcane]
 #[allow(dead_code)]
-unsafe fn dct4x4_two_sse2(block1: &mut [i32; 16], block2: &mut [i32; 16]) {
+fn dct4x4_two_sse2(token: impl HasSse2 + Copy, block1: &mut [i32; 16], block2: &mut [i32; 16]) {
     // Process both blocks using the single-block implementation
     // AVX2 can potentially do this more efficiently with 256-bit registers
-    dct4x4_sse2(block1);
-    dct4x4_sse2(block2);
+    dct4x4_sse2(token, block1);
+    dct4x4_sse2(token, block2);
 }
 
 /// Inverse DCT using SSE2 - matches libwebp ITransform_One_SSE2
 #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-#[target_feature(enable = "sse2")]
-unsafe fn idct4x4_sse2(block: &mut [i32]) {
+#[arcane]
+fn idct4x4_sse2(token: impl HasSse2 + Copy, block: &mut [i32]) {
     // libwebp IDCT constants:
     // K1 = sqrt(2) * cos(pi/8) * 65536 = 85627 => k1 = 85627 - 65536 = 20091
     // K2 = sqrt(2) * sin(pi/8) * 65536 = 35468 => k2 = 35468 - 65536 = -30068
@@ -314,20 +256,20 @@ unsafe fn idct4x4_sse2(block: &mut [i32]) {
     let zero_four = _mm_set_epi16(0, 0, 0, 0, 4, 4, 4, 4);
 
     // Load i32 values and pack to i16 using SIMD
-    let i32_0 = _mm_loadu_si128(block.as_ptr().add(0) as *const __m128i);
-    let i32_1 = _mm_loadu_si128(block.as_ptr().add(4) as *const __m128i);
-    let i32_2 = _mm_loadu_si128(block.as_ptr().add(8) as *const __m128i);
-    let i32_3 = _mm_loadu_si128(block.as_ptr().add(12) as *const __m128i);
+    let i32_0 = sse2::_mm_loadu_si128(token, <&[i32; 4]>::try_from(&block[0..4]).unwrap());
+    let i32_1 = sse2::_mm_loadu_si128(token, <&[i32; 4]>::try_from(&block[4..8]).unwrap());
+    let i32_2 = sse2::_mm_loadu_si128(token, <&[i32; 4]>::try_from(&block[8..12]).unwrap());
+    let i32_3 = sse2::_mm_loadu_si128(token, <&[i32; 4]>::try_from(&block[12..16]).unwrap());
 
     // Pack i32 to i16 with saturation (values should be small enough)
     let in01 = _mm_packs_epi32(i32_0, i32_1);
     let in23 = _mm_packs_epi32(i32_2, i32_3);
 
     // Vertical pass
-    let (t01, t23) = itransform_pass_sse2(in01, in23, k1k2, k2k1);
+    let (t01, t23) = itransform_pass_sse2(token, in01, in23, k1k2, k2k1);
 
     // Horizontal pass with rounding
-    let (out01, out23) = itransform_pass2_sse2(t01, t23, k1k2, k2k1, zero_four);
+    let (out01, out23) = itransform_pass2_sse2(token, t01, t23, k1k2, k2k1, zero_four);
 
     // Unpack i16 back to i32 using sign extension
     // out01 contains 8 i16 values: [0,1,2,3,4,5,6,7]
@@ -344,17 +286,18 @@ unsafe fn idct4x4_sse2(block: &mut [i32]) {
     let out_3 = _mm_unpackhi_epi16(out23, sign23_lo);
 
     // Store results
-    _mm_storeu_si128(block.as_mut_ptr().add(0) as *mut __m128i, out_0);
-    _mm_storeu_si128(block.as_mut_ptr().add(4) as *mut __m128i, out_1);
-    _mm_storeu_si128(block.as_mut_ptr().add(8) as *mut __m128i, out_2);
-    _mm_storeu_si128(block.as_mut_ptr().add(12) as *mut __m128i, out_3);
+    sse2::_mm_storeu_si128(token, <&mut [i32; 4]>::try_from(&mut block[0..4]).unwrap(), out_0);
+    sse2::_mm_storeu_si128(token, <&mut [i32; 4]>::try_from(&mut block[4..8]).unwrap(), out_1);
+    sse2::_mm_storeu_si128(token, <&mut [i32; 4]>::try_from(&mut block[8..12]).unwrap(), out_2);
+    sse2::_mm_storeu_si128(token, <&mut [i32; 4]>::try_from(&mut block[12..16]).unwrap(), out_3);
 }
 
 /// ITransform vertical pass - matches libwebp
 #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-#[target_feature(enable = "sse2")]
+#[arcane]
 #[inline]
-unsafe fn itransform_pass_sse2(
+fn itransform_pass_sse2(
+    _token: impl HasSse2 + Copy,
     in01: __m128i,
     in23: __m128i,
     k1k2: __m128i,
@@ -401,9 +344,10 @@ unsafe fn itransform_pass_sse2(
 
 /// ITransform horizontal pass with final shift
 #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-#[target_feature(enable = "sse2")]
+#[arcane]
 #[inline]
-unsafe fn itransform_pass2_sse2(
+fn itransform_pass2_sse2(
+    _token: impl HasSse2 + Copy,
     t01: __m128i,
     t23: __m128i,
     k1k2: __m128i,
@@ -450,81 +394,12 @@ unsafe fn itransform_pass2_sse2(
 }
 
 // =============================================================================
-// AVX2 + FMA Implementation
-// =============================================================================
-
-#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-#[target_feature(enable = "avx2", enable = "fma")]
-unsafe fn dct4x4_avx2(block: &mut [i32; 16]) {
-    // AVX2 allows processing 16 x i16 in one __m256i
-    // But the algorithm structure doesn't change much for a single 4x4 block
-    // Use SSE2 path for single block
-    dct4x4_sse2(block);
-}
-
-#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-#[target_feature(enable = "avx2", enable = "fma")]
-unsafe fn idct4x4_avx2(block: &mut [i32]) {
-    idct4x4_sse2(block);
-}
-
-#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-#[target_feature(enable = "avx2", enable = "fma")]
-#[allow(dead_code)]
-unsafe fn dct4x4_two_avx2(block1: &mut [i32; 16], block2: &mut [i32; 16]) {
-    // For now, fall back to SSE2 x2 which is already fast
-    // AVX2 could be optimized to process both blocks in 256-bit registers
-    dct4x4_two_sse2(block1, block2);
-}
-
-// =============================================================================
-// AVX-512 Implementation
-// =============================================================================
-
-#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-#[target_feature(enable = "avx512f", enable = "avx512bw", enable = "avx512vl")]
-unsafe fn dct4x4_avx512(block: &mut [i32; 16]) {
-    // 4x4 block is too small to benefit from AVX-512
-    dct4x4_avx2(block);
-}
-
-#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-#[target_feature(enable = "avx512f", enable = "avx512bw", enable = "avx512vl")]
-unsafe fn idct4x4_avx512(block: &mut [i32]) {
-    idct4x4_avx2(block);
-}
-
-#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-#[target_feature(enable = "avx512f", enable = "avx512bw", enable = "avx512vl")]
-#[allow(dead_code)]
-unsafe fn dct4x4_two_avx512(block1: &mut [i32; 16], block2: &mut [i32; 16]) {
-    // With AVX-512, we could process 4 blocks at once (32 x i16)
-    // For 2 blocks, AVX2 is sufficient
-    dct4x4_two_avx2(block1, block2);
-}
-
-// =============================================================================
 // Tests
 // =============================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_cpu_detection() {
-        let features = detect_cpu_features();
-        assert!(features >= FEAT_SSE2);
-        println!(
-            "Detected CPU features: {}",
-            match features {
-                FEAT_SSE2 => "SSE2",
-                FEAT_AVX2_FMA => "AVX2+FMA",
-                FEAT_AVX512 => "AVX-512",
-                _ => "Unknown",
-            }
-        );
-    }
 
     #[test]
     fn test_dct_intrinsics_matches_scalar() {

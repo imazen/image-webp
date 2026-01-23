@@ -3,31 +3,37 @@
 //! Processes 16 pixels at once by loading entire rows, matching libwebp's approach.
 //! For horizontal filtering (vertical edges), uses the transpose technique:
 //! load 16 rows × 8 columns, transpose to 8 × 16, filter as vertical, transpose back.
+//!
+//! Uses archmage for safe SIMD intrinsics with token-based CPU feature verification.
 
 #![allow(dead_code)]
 
+#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+use archmage::{arcane, mem::sse2, HasSse41};
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::*;
 
 /// Compute the "needs filter" mask for simple filter.
 /// Returns a mask where each byte is 0xFF if the pixel should be filtered, 0x00 otherwise.
 /// Condition: |p0 - q0| * 2 + |p1 - q1| / 2 <= thresh
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[arcane]
 #[inline(always)]
-unsafe fn needs_filter_16(p1: __m128i, p0: __m128i, q0: __m128i, q1: __m128i, thresh: i32) -> __m128i {
+fn needs_filter_16(
+    _token: impl HasSse41,
+    p1: __m128i,
+    p0: __m128i,
+    q0: __m128i,
+    q1: __m128i,
+    thresh: i32,
+) -> __m128i {
     let t = _mm_set1_epi8(thresh as i8);
 
     // |p0 - q0|
-    let abs_p0_q0 = _mm_or_si128(
-        _mm_subs_epu8(p0, q0),
-        _mm_subs_epu8(q0, p0),
-    );
+    let abs_p0_q0 = _mm_or_si128(_mm_subs_epu8(p0, q0), _mm_subs_epu8(q0, p0));
 
     // |p1 - q1|
-    let abs_p1_q1 = _mm_or_si128(
-        _mm_subs_epu8(p1, q1),
-        _mm_subs_epu8(q1, p1),
-    );
+    let abs_p1_q1 = _mm_or_si128(_mm_subs_epu8(p1, q1), _mm_subs_epu8(q1, p1));
 
     // |p0 - q0| * 2
     let doubled = _mm_adds_epu8(abs_p0_q0, abs_p0_q0);
@@ -45,9 +51,16 @@ unsafe fn needs_filter_16(p1: __m128i, p0: __m128i, q0: __m128i, q1: __m128i, th
 
 /// Get the base delta for the simple filter: clamp(p1 - q1 + 3*(q0 - p0))
 /// Uses signed arithmetic with sign bit flipping.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[arcane]
 #[inline(always)]
-unsafe fn get_base_delta_16(p1: __m128i, p0: __m128i, q0: __m128i, q1: __m128i) -> __m128i {
+fn get_base_delta_16(
+    _token: impl HasSse41,
+    p1: __m128i,
+    p0: __m128i,
+    q0: __m128i,
+    q1: __m128i,
+) -> __m128i {
     // Convert to signed by XOR with 0x80
     let sign = _mm_set1_epi8(-128i8);
     let p1s = _mm_xor_si128(p1, sign);
@@ -68,9 +81,10 @@ unsafe fn get_base_delta_16(p1: __m128i, p0: __m128i, q0: __m128i, q1: __m128i) 
 }
 
 /// Signed right shift by 3 for packed bytes (in signed domain).
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[arcane]
 #[inline(always)]
-unsafe fn signed_shift_right_3(v: __m128i) -> __m128i {
+fn signed_shift_right_3(_token: impl HasSse41, v: __m128i) -> __m128i {
     // For signed bytes, we need to handle sign extension properly.
     // Unpack to 16-bit, shift, pack back.
     let lo = _mm_srai_epi16(_mm_unpacklo_epi8(v, v), 11); // sign-extend and shift
@@ -79,9 +93,15 @@ unsafe fn signed_shift_right_3(v: __m128i) -> __m128i {
 }
 
 /// Apply the simple filter to p0 and q0 given the filter value.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[arcane]
 #[inline(always)]
-unsafe fn do_simple_filter_16(p0: &mut __m128i, q0: &mut __m128i, fl: __m128i) {
+fn do_simple_filter_16(
+    token: impl HasSse41 + Copy,
+    p0: &mut __m128i,
+    q0: &mut __m128i,
+    fl: __m128i,
+) {
     let sign = _mm_set1_epi8(-128i8);
     let k3 = _mm_set1_epi8(3);
     let k4 = _mm_set1_epi8(4);
@@ -91,8 +111,8 @@ unsafe fn do_simple_filter_16(p0: &mut __m128i, q0: &mut __m128i, fl: __m128i) {
     let v3 = _mm_adds_epi8(fl, k3);
     let v4 = _mm_adds_epi8(fl, k4);
 
-    let v3 = signed_shift_right_3(v3);
-    let v4 = signed_shift_right_3(v4);
+    let v3 = signed_shift_right_3(token, v3);
+    let v4 = signed_shift_right_3(token, v4);
 
     // Convert p0, q0 to signed
     let mut p0s = _mm_xor_si128(*p0, sign);
@@ -112,41 +132,65 @@ unsafe fn do_simple_filter_16(p0: &mut __m128i, q0: &mut __m128i, fl: __m128i) {
 /// This filters the edge between row (point - stride) and row (point).
 /// Processes 16 consecutive pixels in a single call.
 ///
-/// # Safety
-/// Requires SSE4.1. Buffer must have at least point + stride + 16 bytes.
+/// Buffer must have at least point + stride + 16 bytes.
 /// point must be >= 2 * stride (for p1 access).
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse4.1")]
-pub unsafe fn simple_v_filter16(pixels: &mut [u8], point: usize, stride: usize, thresh: i32) {
-    // Load 16 pixels from each of the 4 rows
-    let p1 = _mm_loadu_si128(pixels.as_ptr().add(point - 2 * stride) as *const __m128i);
-    let mut p0 = _mm_loadu_si128(pixels.as_ptr().add(point - stride) as *const __m128i);
-    let mut q0 = _mm_loadu_si128(pixels.as_ptr().add(point) as *const __m128i);
-    let q1 = _mm_loadu_si128(pixels.as_ptr().add(point + stride) as *const __m128i);
+#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[arcane]
+pub fn simple_v_filter16(
+    token: impl HasSse41 + Copy,
+    pixels: &mut [u8],
+    point: usize,
+    stride: usize,
+    thresh: i32,
+) {
+    // Load 16 pixels from each of the 4 rows using safe memory operations
+    let p1 = sse2::_mm_loadu_si128(
+        token,
+        <&[u8; 16]>::try_from(&pixels[point - 2 * stride..][..16]).unwrap(),
+    );
+    let mut p0 = sse2::_mm_loadu_si128(
+        token,
+        <&[u8; 16]>::try_from(&pixels[point - stride..][..16]).unwrap(),
+    );
+    let mut q0 = sse2::_mm_loadu_si128(
+        token,
+        <&[u8; 16]>::try_from(&pixels[point..][..16]).unwrap(),
+    );
+    let q1 = sse2::_mm_loadu_si128(
+        token,
+        <&[u8; 16]>::try_from(&pixels[point + stride..][..16]).unwrap(),
+    );
 
     // Check which pixels need filtering
-    let mask = needs_filter_16(p1, p0, q0, q1, thresh);
+    let mask = needs_filter_16(token, p1, p0, q0, q1, thresh);
 
     // Get filter delta
-    let fl = get_base_delta_16(p1, p0, q0, q1);
+    let fl = get_base_delta_16(token, p1, p0, q0, q1);
     let fl_masked = _mm_and_si128(fl, mask);
 
     // Apply filter
-    do_simple_filter_16(&mut p0, &mut q0, fl_masked);
+    do_simple_filter_16(token, &mut p0, &mut q0, fl_masked);
 
-    // Store results
-    _mm_storeu_si128(pixels.as_mut_ptr().add(point - stride) as *mut __m128i, p0);
-    _mm_storeu_si128(pixels.as_mut_ptr().add(point) as *mut __m128i, q0);
+    // Store results using safe memory operations
+    sse2::_mm_storeu_si128(
+        token,
+        <&mut [u8; 16]>::try_from(&mut pixels[point - stride..][..16]).unwrap(),
+        p0,
+    );
+    sse2::_mm_storeu_si128(
+        token,
+        <&mut [u8; 16]>::try_from(&mut pixels[point..][..16]).unwrap(),
+        q0,
+    );
 }
 
 /// Transpose an 8x16 matrix of bytes to 16x8.
 /// Input: 16 __m128i values, each containing 8 bytes (low 64 bits used).
 /// Output: 8 __m128i values, each containing 16 bytes.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[arcane]
 #[inline(always)]
-unsafe fn transpose_8x16_to_16x8(
-    rows: &[__m128i; 16],
-) -> [__m128i; 8] {
+fn transpose_8x16_to_16x8(_token: impl HasSse41, rows: &[__m128i; 16]) -> [__m128i; 8] {
     // Stage 1: interleave pairs
     let t0 = _mm_unpacklo_epi8(rows[0], rows[1]);
     let t1 = _mm_unpacklo_epi8(rows[2], rows[3]);
@@ -192,9 +236,11 @@ unsafe fn transpose_8x16_to_16x8(
 
 /// Transpose 4 columns (p1, p0, q0, q1) of 16 bytes each back to 16 rows of 4 bytes.
 /// Returns values suitable for storing as 32-bit integers per row.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[arcane]
 #[inline(always)]
-unsafe fn transpose_4x16_to_16x4(
+fn transpose_4x16_to_16x4(
+    _token: impl HasSse41,
     p1: __m128i,
     p0: __m128i,
     q0: __m128i,
@@ -239,21 +285,30 @@ unsafe fn transpose_4x16_to_16x4(
 /// Uses the transpose technique: load 16 rows × 8 columns, transpose,
 /// apply vertical filter logic, transpose back, store.
 ///
-/// # Safety
-/// Requires SSE4.1. Each row must have at least 4 bytes before and after the edge point.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse4.1")]
-pub unsafe fn simple_h_filter16(pixels: &mut [u8], x: usize, y_start: usize, stride: usize, thresh: i32) {
+/// Each row must have at least 4 bytes before and after the edge point.
+#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[arcane]
+pub fn simple_h_filter16(
+    token: impl HasSse41 + Copy,
+    pixels: &mut [u8],
+    x: usize,
+    y_start: usize,
+    stride: usize,
+    thresh: i32,
+) {
     // Load 16 rows of 8 pixels each (p3,p2,p1,p0,q0,q1,q2,q3)
     // The edge is between p0 (x-1) and q0 (x), so we load from x-4 to x+3
     let mut rows = [_mm_setzero_si128(); 16];
     for (i, row) in rows.iter_mut().enumerate() {
         let row_start = (y_start + i) * stride + x - 4;
-        *row = _mm_loadl_epi64(pixels.as_ptr().add(row_start) as *const __m128i);
+        *row = sse2::_mm_loadu_si64(
+            token,
+            <&[u8; 8]>::try_from(&pixels[row_start..][..8]).unwrap(),
+        );
     }
 
     // Transpose 8x16 to 16x8: now we have 8 columns of 16 pixels each
-    let cols = transpose_8x16_to_16x8(&rows);
+    let cols = transpose_8x16_to_16x8(token, &rows);
     // cols[2] = p1 (16 pixels from 16 different rows)
     // cols[3] = p0
     // cols[4] = q0
@@ -265,27 +320,31 @@ pub unsafe fn simple_h_filter16(pixels: &mut [u8], x: usize, y_start: usize, str
     let q1 = cols[5];
 
     // Apply simple filter (same logic as vertical, but on transposed data)
-    let mask = needs_filter_16(p1, p0, q0, q1, thresh);
-    let fl = get_base_delta_16(p1, p0, q0, q1);
+    let mask = needs_filter_16(token, p1, p0, q0, q1, thresh);
+    let fl = get_base_delta_16(token, p1, p0, q0, q1);
     let fl_masked = _mm_and_si128(fl, mask);
-    do_simple_filter_16(&mut p0, &mut q0, fl_masked);
+    do_simple_filter_16(token, &mut p0, &mut q0, fl_masked);
 
     // Transpose back: convert 4 columns of 16 to 16 rows of 4
-    let packed = transpose_4x16_to_16x4(p1, p0, q0, q1);
+    let packed = transpose_4x16_to_16x4(token, p1, p0, q0, q1);
 
-    // Store 4 bytes per row (p1, p0, q0, q1) using unaligned write
+    // Store 4 bytes per row (p1, p0, q0, q1) using safe store
     for (i, &val) in packed.iter().enumerate() {
         let row_start = (y_start + i) * stride + x - 2;
-        let ptr = pixels.as_mut_ptr().add(row_start) as *mut i32;
-        std::ptr::write_unaligned(ptr, val);
+        sse2::_mm_storeu_si32(
+            token,
+            <&mut [u8; 4]>::try_from(&mut pixels[row_start..][..4]).unwrap(),
+            _mm_cvtsi32_si128(val),
+        );
     }
 }
 
 /// Apply simple vertical filter to entire macroblock edge (16 pixels).
 /// This is the main entry point for filtering horizontal edges between macroblocks.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse4.1")]
-pub unsafe fn simple_filter_mb_edge_v(
+#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[arcane]
+pub fn simple_filter_mb_edge_v(
+    token: impl HasSse41 + Copy,
     pixels: &mut [u8],
     mb_y: usize,
     mb_x: usize,
@@ -293,14 +352,15 @@ pub unsafe fn simple_filter_mb_edge_v(
     thresh: i32,
 ) {
     let point = mb_y * 16 * stride + mb_x * 16;
-    simple_v_filter16(pixels, point, stride, thresh);
+    simple_v_filter16(token, pixels, point, stride, thresh);
 }
 
 /// Apply simple horizontal filter to entire macroblock edge (16 rows).
 /// This is the main entry point for filtering vertical edges between macroblocks.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse4.1")]
-pub unsafe fn simple_filter_mb_edge_h(
+#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[arcane]
+pub fn simple_filter_mb_edge_h(
+    token: impl HasSse41 + Copy,
     pixels: &mut [u8],
     mb_y: usize,
     mb_x: usize,
@@ -309,14 +369,15 @@ pub unsafe fn simple_filter_mb_edge_h(
 ) {
     let x = mb_x * 16;
     let y_start = mb_y * 16;
-    simple_h_filter16(pixels, x, y_start, stride, thresh);
+    simple_h_filter16(token, pixels, x, y_start, stride, thresh);
 }
 
 /// Apply simple vertical filter to a subblock edge within a macroblock.
 /// y_offset is the row offset within the macroblock (4, 8, or 12).
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse4.1")]
-pub unsafe fn simple_filter_subblock_edge_v(
+#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[arcane]
+pub fn simple_filter_subblock_edge_v(
+    token: impl HasSse41 + Copy,
     pixels: &mut [u8],
     mb_y: usize,
     mb_x: usize,
@@ -325,14 +386,15 @@ pub unsafe fn simple_filter_subblock_edge_v(
     thresh: i32,
 ) {
     let point = (mb_y * 16 + y_offset) * stride + mb_x * 16;
-    simple_v_filter16(pixels, point, stride, thresh);
+    simple_v_filter16(token, pixels, point, stride, thresh);
 }
 
 /// Apply simple horizontal filter to a subblock edge within a macroblock.
 /// x_offset is the column offset within the macroblock (4, 8, or 12).
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse4.1")]
-pub unsafe fn simple_filter_subblock_edge_h(
+#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[arcane]
+pub fn simple_filter_subblock_edge_h(
+    token: impl HasSse41 + Copy,
     pixels: &mut [u8],
     mb_y: usize,
     mb_x: usize,
@@ -342,7 +404,7 @@ pub unsafe fn simple_filter_subblock_edge_h(
 ) {
     let x = mb_x * 16 + x_offset;
     let y_start = mb_y * 16;
-    simple_h_filter16(pixels, x, y_start, stride, thresh);
+    simple_h_filter16(token, pixels, x, y_start, stride, thresh);
 }
 
 // =============================================================================
@@ -351,17 +413,25 @@ pub unsafe fn simple_filter_subblock_edge_h(
 
 /// Check if pixels need filtering using the full normal filter threshold.
 /// Condition: simple_threshold AND all interior differences <= interior_limit
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[arcane]
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-unsafe fn needs_filter_normal_16(
-    p3: __m128i, p2: __m128i, p1: __m128i, p0: __m128i,
-    q0: __m128i, q1: __m128i, q2: __m128i, q3: __m128i,
+fn needs_filter_normal_16(
+    token: impl HasSse41 + Copy,
+    p3: __m128i,
+    p2: __m128i,
+    p1: __m128i,
+    p0: __m128i,
+    q0: __m128i,
+    q1: __m128i,
+    q2: __m128i,
+    q3: __m128i,
     edge_limit: i32,
     interior_limit: i32,
 ) -> __m128i {
     // First check simple threshold
-    let simple_mask = needs_filter_16(p1, p0, q0, q1, edge_limit);
+    let simple_mask = needs_filter_16(token, p1, p0, q0, q1, edge_limit);
 
     let i_limit = _mm_set1_epi8(interior_limit as i8);
 
@@ -398,25 +468,24 @@ unsafe fn needs_filter_normal_16(
 }
 
 /// Check high edge variance: |p1 - p0| > thresh OR |q1 - q0| > thresh
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[arcane]
 #[inline(always)]
-unsafe fn high_edge_variance_16(
-    p1: __m128i, p0: __m128i, q0: __m128i, q1: __m128i,
+fn high_edge_variance_16(
+    _token: impl HasSse41,
+    p1: __m128i,
+    p0: __m128i,
+    q0: __m128i,
+    q1: __m128i,
     hev_thresh: i32,
 ) -> __m128i {
     let t = _mm_set1_epi8(hev_thresh as i8);
 
     // |p1 - p0|
-    let d_p1_p0 = _mm_or_si128(
-        _mm_subs_epu8(p1, p0),
-        _mm_subs_epu8(p0, p1),
-    );
+    let d_p1_p0 = _mm_or_si128(_mm_subs_epu8(p1, p0), _mm_subs_epu8(p0, p1));
 
     // |q1 - q0|
-    let d_q1_q0 = _mm_or_si128(
-        _mm_subs_epu8(q1, q0),
-        _mm_subs_epu8(q0, q1),
-    );
+    let d_q1_q0 = _mm_or_si128(_mm_subs_epu8(q1, q0), _mm_subs_epu8(q0, q1));
 
     // Check if either > thresh
     // subs_epu8 saturates at 0, so d > t means d - t > 0
@@ -424,8 +493,14 @@ unsafe fn high_edge_variance_16(
     let q_exceeds = _mm_subs_epu8(d_q1_q0, t);
 
     // hev = true if exceeds > 0 (i.e., not equal to zero)
-    let p_hev = _mm_xor_si128(_mm_cmpeq_epi8(p_exceeds, _mm_setzero_si128()), _mm_set1_epi8(-1));
-    let q_hev = _mm_xor_si128(_mm_cmpeq_epi8(q_exceeds, _mm_setzero_si128()), _mm_set1_epi8(-1));
+    let p_hev = _mm_xor_si128(
+        _mm_cmpeq_epi8(p_exceeds, _mm_setzero_si128()),
+        _mm_set1_epi8(-1),
+    );
+    let q_hev = _mm_xor_si128(
+        _mm_cmpeq_epi8(q_exceeds, _mm_setzero_si128()),
+        _mm_set1_epi8(-1),
+    );
 
     _mm_or_si128(p_hev, q_hev)
 }
@@ -433,12 +508,17 @@ unsafe fn high_edge_variance_16(
 /// Apply the subblock/inner filter (DoFilter4 from libwebp).
 /// When hev=true: only modify p0, q0 (use outer taps)
 /// When hev=false: modify p1, p0, q0, q1
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[arcane]
 #[inline(always)]
-unsafe fn do_filter4_16(
-    p1: &mut __m128i, p0: &mut __m128i,
-    q0: &mut __m128i, q1: &mut __m128i,
-    mask: __m128i, hev: __m128i,
+fn do_filter4_16(
+    token: impl HasSse41 + Copy,
+    p1: &mut __m128i,
+    p0: &mut __m128i,
+    q0: &mut __m128i,
+    q1: &mut __m128i,
+    mask: __m128i,
+    hev: __m128i,
 ) {
     let sign = _mm_set1_epi8(-128i8);
 
@@ -472,8 +552,8 @@ unsafe fn do_filter4_16(
     let f1 = _mm_adds_epi8(a, k4);
     let f2 = _mm_adds_epi8(a, k3);
 
-    let f1 = signed_shift_right_3(f1);
-    let f2 = signed_shift_right_3(f2);
+    let f1 = signed_shift_right_3(token, f1);
+    let f2 = signed_shift_right_3(token, f2);
 
     // Update p0, q0
     let new_p0s = _mm_adds_epi8(p0s, f2);
@@ -482,9 +562,9 @@ unsafe fn do_filter4_16(
     // For !hev case, also update p1, q1
     // a2 = (f1 + 1) >> 1 -- spread the filter to outer pixels
     let a2 = _mm_adds_epi8(f1, _mm_set1_epi8(1));
-    let a2 = signed_shift_right_1(a2);
+    let a2 = signed_shift_right_1(token, a2);
     let a2 = _mm_andnot_si128(hev, a2); // Only when !hev
-    let a2 = _mm_and_si128(a2, mask);   // Only when filtered
+    let a2 = _mm_and_si128(a2, mask); // Only when filtered
 
     let new_p1s = _mm_adds_epi8(p1s, a2);
     let new_q1s = _mm_subs_epi8(q1s, a2);
@@ -497,9 +577,10 @@ unsafe fn do_filter4_16(
 }
 
 /// Signed right shift by 1 for packed bytes
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[arcane]
 #[inline(always)]
-unsafe fn signed_shift_right_1(v: __m128i) -> __m128i {
+fn signed_shift_right_1(_token: impl HasSse41, v: __m128i) -> __m128i {
     let lo = _mm_srai_epi16(_mm_unpacklo_epi8(v, v), 9);
     let hi = _mm_srai_epi16(_mm_unpackhi_epi8(v, v), 9);
     _mm_packs_epi16(lo, hi)
@@ -508,13 +589,20 @@ unsafe fn signed_shift_right_1(v: __m128i) -> __m128i {
 /// Apply the macroblock/outer filter (DoFilter6 from libwebp).
 /// When hev=true: only modify p0, q0 (use outer taps)
 /// When hev=false: modify p2, p1, p0, q0, q1, q2 with weighted filter
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[arcane]
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-unsafe fn do_filter6_16(
-    p2: &mut __m128i, p1: &mut __m128i, p0: &mut __m128i,
-    q0: &mut __m128i, q1: &mut __m128i, q2: &mut __m128i,
-    mask: __m128i, hev: __m128i,
+fn do_filter6_16(
+    token: impl HasSse41 + Copy,
+    p2: &mut __m128i,
+    p1: &mut __m128i,
+    p0: &mut __m128i,
+    q0: &mut __m128i,
+    q1: &mut __m128i,
+    q2: &mut __m128i,
+    mask: __m128i,
+    hev: __m128i,
 ) {
     let sign = _mm_set1_epi8(-128i8);
     let not_hev = _mm_andnot_si128(hev, _mm_set1_epi8(-1));
@@ -539,8 +627,8 @@ unsafe fn do_filter6_16(
 
     let k3 = _mm_set1_epi8(3);
     let k4 = _mm_set1_epi8(4);
-    let f1_hev = signed_shift_right_3(_mm_adds_epi8(a_hev, k4));
-    let f2_hev = signed_shift_right_3(_mm_adds_epi8(a_hev, k3));
+    let f1_hev = signed_shift_right_3(token, _mm_adds_epi8(a_hev, k4));
+    let f2_hev = signed_shift_right_3(token, _mm_adds_epi8(a_hev, k3));
 
     // For !hev path: wide filter using 16-bit precision
     // w = clamp(p1 - q1 + 3*(q0 - p0))
@@ -550,21 +638,25 @@ unsafe fn do_filter6_16(
 
     // We need 16-bit precision for the multiply
     // Process low and high halves separately
-    let (new_p2_lo, new_p1_lo, new_p0_lo, new_q0_lo, new_q1_lo, new_q2_lo) =
-        filter6_wide_half(_mm_unpacklo_epi8(p2s, p2s),
-                          _mm_unpacklo_epi8(p1s, p1s),
-                          _mm_unpacklo_epi8(p0s, p0s),
-                          _mm_unpacklo_epi8(q0s, q0s),
-                          _mm_unpacklo_epi8(q1s, q1s),
-                          _mm_unpacklo_epi8(q2s, q2s));
+    let (new_p2_lo, new_p1_lo, new_p0_lo, new_q0_lo, new_q1_lo, new_q2_lo) = filter6_wide_half(
+        token,
+        _mm_unpacklo_epi8(p2s, p2s),
+        _mm_unpacklo_epi8(p1s, p1s),
+        _mm_unpacklo_epi8(p0s, p0s),
+        _mm_unpacklo_epi8(q0s, q0s),
+        _mm_unpacklo_epi8(q1s, q1s),
+        _mm_unpacklo_epi8(q2s, q2s),
+    );
 
-    let (new_p2_hi, new_p1_hi, new_p0_hi, new_q0_hi, new_q1_hi, new_q2_hi) =
-        filter6_wide_half(_mm_unpackhi_epi8(p2s, p2s),
-                          _mm_unpackhi_epi8(p1s, p1s),
-                          _mm_unpackhi_epi8(p0s, p0s),
-                          _mm_unpackhi_epi8(q0s, q0s),
-                          _mm_unpackhi_epi8(q1s, q1s),
-                          _mm_unpackhi_epi8(q2s, q2s));
+    let (new_p2_hi, new_p1_hi, new_p0_hi, new_q0_hi, new_q1_hi, new_q2_hi) = filter6_wide_half(
+        token,
+        _mm_unpackhi_epi8(p2s, p2s),
+        _mm_unpackhi_epi8(p1s, p1s),
+        _mm_unpackhi_epi8(p0s, p0s),
+        _mm_unpackhi_epi8(q0s, q0s),
+        _mm_unpackhi_epi8(q1s, q1s),
+        _mm_unpackhi_epi8(q2s, q2s),
+    );
 
     // Pack back to bytes
     let new_p2_wide = _mm_packs_epi16(new_p2_lo, new_p2_hi);
@@ -578,7 +670,7 @@ unsafe fn do_filter6_16(
     let mask_not_hev = _mm_and_si128(mask, not_hev);
 
     // For p0, q0: use hev result where hev, wide result where !hev
-    let new_p0s = _mm_adds_epi8(p0s, f2_hev);  // hev path
+    let new_p0s = _mm_adds_epi8(p0s, f2_hev); // hev path
     let new_q0s = _mm_subs_epi8(q0s, f1_hev);
 
     // Blend: select wide where !hev, hev result where hev (and filtered)
@@ -601,11 +693,17 @@ unsafe fn do_filter6_16(
 }
 
 /// Helper for filter6 wide path - processes 8 pixels in 16-bit precision
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[arcane]
 #[inline(always)]
-unsafe fn filter6_wide_half(
-    p2: __m128i, p1: __m128i, p0: __m128i,
-    q0: __m128i, q1: __m128i, q2: __m128i,
+fn filter6_wide_half(
+    _token: impl HasSse41,
+    p2: __m128i,
+    p1: __m128i,
+    p0: __m128i,
+    q0: __m128i,
+    q1: __m128i,
+    q2: __m128i,
 ) -> (__m128i, __m128i, __m128i, __m128i, __m128i, __m128i) {
     // Sign extend to 16-bit (values are duplicated, take every other)
     let p2_16 = _mm_srai_epi16(p2, 8);
@@ -641,16 +739,26 @@ unsafe fn filter6_wide_half(
     let new_q2 = _mm_sub_epi16(q2_16, a2);
 
     // Clamp to [-128, 127]
-    let clamp = |v: __m128i| _mm_max_epi16(_mm_min_epi16(v, _mm_set1_epi16(127)), _mm_set1_epi16(-128));
+    let clamp = |v: __m128i| {
+        _mm_max_epi16(_mm_min_epi16(v, _mm_set1_epi16(127)), _mm_set1_epi16(-128))
+    };
 
-    (clamp(new_p2), clamp(new_p1), clamp(new_p0), clamp(new_q0), clamp(new_q1), clamp(new_q2))
+    (
+        clamp(new_p2),
+        clamp(new_p1),
+        clamp(new_p0),
+        clamp(new_q0),
+        clamp(new_q1),
+        clamp(new_q2),
+    )
 }
 
 /// Apply normal vertical filter (DoFilter4) to 16 pixels across a horizontal edge.
 /// This is for subblock edges within a macroblock.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse4.1")]
-pub unsafe fn normal_v_filter16_inner(
+#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[arcane]
+pub fn normal_v_filter16_inner(
+    token: impl HasSse41 + Copy,
     pixels: &mut [u8],
     point: usize,
     stride: usize,
@@ -659,35 +767,88 @@ pub unsafe fn normal_v_filter16_inner(
     edge_limit: i32,
 ) {
     // Load 8 rows of 16 pixels each
-    let p3 = _mm_loadu_si128(pixels.as_ptr().add(point - 4 * stride) as *const __m128i);
-    let p2 = _mm_loadu_si128(pixels.as_ptr().add(point - 3 * stride) as *const __m128i);
-    let mut p1 = _mm_loadu_si128(pixels.as_ptr().add(point - 2 * stride) as *const __m128i);
-    let mut p0 = _mm_loadu_si128(pixels.as_ptr().add(point - stride) as *const __m128i);
-    let mut q0 = _mm_loadu_si128(pixels.as_ptr().add(point) as *const __m128i);
-    let mut q1 = _mm_loadu_si128(pixels.as_ptr().add(point + stride) as *const __m128i);
-    let q2 = _mm_loadu_si128(pixels.as_ptr().add(point + 2 * stride) as *const __m128i);
-    let q3 = _mm_loadu_si128(pixels.as_ptr().add(point + 3 * stride) as *const __m128i);
+    let p3 = sse2::_mm_loadu_si128(
+        token,
+        <&[u8; 16]>::try_from(&pixels[point - 4 * stride..][..16]).unwrap(),
+    );
+    let p2 = sse2::_mm_loadu_si128(
+        token,
+        <&[u8; 16]>::try_from(&pixels[point - 3 * stride..][..16]).unwrap(),
+    );
+    let mut p1 = sse2::_mm_loadu_si128(
+        token,
+        <&[u8; 16]>::try_from(&pixels[point - 2 * stride..][..16]).unwrap(),
+    );
+    let mut p0 = sse2::_mm_loadu_si128(
+        token,
+        <&[u8; 16]>::try_from(&pixels[point - stride..][..16]).unwrap(),
+    );
+    let mut q0 = sse2::_mm_loadu_si128(
+        token,
+        <&[u8; 16]>::try_from(&pixels[point..][..16]).unwrap(),
+    );
+    let mut q1 = sse2::_mm_loadu_si128(
+        token,
+        <&[u8; 16]>::try_from(&pixels[point + stride..][..16]).unwrap(),
+    );
+    let q2 = sse2::_mm_loadu_si128(
+        token,
+        <&[u8; 16]>::try_from(&pixels[point + 2 * stride..][..16]).unwrap(),
+    );
+    let q3 = sse2::_mm_loadu_si128(
+        token,
+        <&[u8; 16]>::try_from(&pixels[point + 3 * stride..][..16]).unwrap(),
+    );
 
     // Check if filtering is needed
-    let mask = needs_filter_normal_16(p3, p2, p1, p0, q0, q1, q2, q3, edge_limit, interior_limit);
+    let mask = needs_filter_normal_16(
+        token,
+        p3,
+        p2,
+        p1,
+        p0,
+        q0,
+        q1,
+        q2,
+        q3,
+        edge_limit,
+        interior_limit,
+    );
 
     // Check high edge variance
-    let hev = high_edge_variance_16(p1, p0, q0, q1, hev_thresh);
+    let hev = high_edge_variance_16(token, p1, p0, q0, q1, hev_thresh);
 
     // Apply filter
-    do_filter4_16(&mut p1, &mut p0, &mut q0, &mut q1, mask, hev);
+    do_filter4_16(token, &mut p1, &mut p0, &mut q0, &mut q1, mask, hev);
 
     // Store results
-    _mm_storeu_si128(pixels.as_mut_ptr().add(point - 2 * stride) as *mut __m128i, p1);
-    _mm_storeu_si128(pixels.as_mut_ptr().add(point - stride) as *mut __m128i, p0);
-    _mm_storeu_si128(pixels.as_mut_ptr().add(point) as *mut __m128i, q0);
-    _mm_storeu_si128(pixels.as_mut_ptr().add(point + stride) as *mut __m128i, q1);
+    sse2::_mm_storeu_si128(
+        token,
+        <&mut [u8; 16]>::try_from(&mut pixels[point - 2 * stride..][..16]).unwrap(),
+        p1,
+    );
+    sse2::_mm_storeu_si128(
+        token,
+        <&mut [u8; 16]>::try_from(&mut pixels[point - stride..][..16]).unwrap(),
+        p0,
+    );
+    sse2::_mm_storeu_si128(
+        token,
+        <&mut [u8; 16]>::try_from(&mut pixels[point..][..16]).unwrap(),
+        q0,
+    );
+    sse2::_mm_storeu_si128(
+        token,
+        <&mut [u8; 16]>::try_from(&mut pixels[point + stride..][..16]).unwrap(),
+        q1,
+    );
 }
 
 /// Apply normal vertical filter (DoFilter6) to 16 pixels across a horizontal macroblock edge.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse4.1")]
-pub unsafe fn normal_v_filter16_edge(
+#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[arcane]
+pub fn normal_v_filter16_edge(
+    token: impl HasSse41 + Copy,
     pixels: &mut [u8],
     point: usize,
     stride: usize,
@@ -696,38 +857,102 @@ pub unsafe fn normal_v_filter16_edge(
     edge_limit: i32,
 ) {
     // Load 8 rows of 16 pixels each
-    let p3 = _mm_loadu_si128(pixels.as_ptr().add(point - 4 * stride) as *const __m128i);
-    let mut p2 = _mm_loadu_si128(pixels.as_ptr().add(point - 3 * stride) as *const __m128i);
-    let mut p1 = _mm_loadu_si128(pixels.as_ptr().add(point - 2 * stride) as *const __m128i);
-    let mut p0 = _mm_loadu_si128(pixels.as_ptr().add(point - stride) as *const __m128i);
-    let mut q0 = _mm_loadu_si128(pixels.as_ptr().add(point) as *const __m128i);
-    let mut q1 = _mm_loadu_si128(pixels.as_ptr().add(point + stride) as *const __m128i);
-    let mut q2 = _mm_loadu_si128(pixels.as_ptr().add(point + 2 * stride) as *const __m128i);
-    let q3 = _mm_loadu_si128(pixels.as_ptr().add(point + 3 * stride) as *const __m128i);
+    let p3 = sse2::_mm_loadu_si128(
+        token,
+        <&[u8; 16]>::try_from(&pixels[point - 4 * stride..][..16]).unwrap(),
+    );
+    let mut p2 = sse2::_mm_loadu_si128(
+        token,
+        <&[u8; 16]>::try_from(&pixels[point - 3 * stride..][..16]).unwrap(),
+    );
+    let mut p1 = sse2::_mm_loadu_si128(
+        token,
+        <&[u8; 16]>::try_from(&pixels[point - 2 * stride..][..16]).unwrap(),
+    );
+    let mut p0 = sse2::_mm_loadu_si128(
+        token,
+        <&[u8; 16]>::try_from(&pixels[point - stride..][..16]).unwrap(),
+    );
+    let mut q0 = sse2::_mm_loadu_si128(
+        token,
+        <&[u8; 16]>::try_from(&pixels[point..][..16]).unwrap(),
+    );
+    let mut q1 = sse2::_mm_loadu_si128(
+        token,
+        <&[u8; 16]>::try_from(&pixels[point + stride..][..16]).unwrap(),
+    );
+    let mut q2 = sse2::_mm_loadu_si128(
+        token,
+        <&[u8; 16]>::try_from(&pixels[point + 2 * stride..][..16]).unwrap(),
+    );
+    let q3 = sse2::_mm_loadu_si128(
+        token,
+        <&[u8; 16]>::try_from(&pixels[point + 3 * stride..][..16]).unwrap(),
+    );
 
     // Check if filtering is needed
-    let mask = needs_filter_normal_16(p3, p2, p1, p0, q0, q1, q2, q3, edge_limit, interior_limit);
+    let mask = needs_filter_normal_16(
+        token,
+        p3,
+        p2,
+        p1,
+        p0,
+        q0,
+        q1,
+        q2,
+        q3,
+        edge_limit,
+        interior_limit,
+    );
 
     // Check high edge variance
-    let hev = high_edge_variance_16(p1, p0, q0, q1, hev_thresh);
+    let hev = high_edge_variance_16(token, p1, p0, q0, q1, hev_thresh);
 
     // Apply filter
-    do_filter6_16(&mut p2, &mut p1, &mut p0, &mut q0, &mut q1, &mut q2, mask, hev);
+    do_filter6_16(
+        token, &mut p2, &mut p1, &mut p0, &mut q0, &mut q1, &mut q2, mask, hev,
+    );
 
     // Store results
-    _mm_storeu_si128(pixels.as_mut_ptr().add(point - 3 * stride) as *mut __m128i, p2);
-    _mm_storeu_si128(pixels.as_mut_ptr().add(point - 2 * stride) as *mut __m128i, p1);
-    _mm_storeu_si128(pixels.as_mut_ptr().add(point - stride) as *mut __m128i, p0);
-    _mm_storeu_si128(pixels.as_mut_ptr().add(point) as *mut __m128i, q0);
-    _mm_storeu_si128(pixels.as_mut_ptr().add(point + stride) as *mut __m128i, q1);
-    _mm_storeu_si128(pixels.as_mut_ptr().add(point + 2 * stride) as *mut __m128i, q2);
+    sse2::_mm_storeu_si128(
+        token,
+        <&mut [u8; 16]>::try_from(&mut pixels[point - 3 * stride..][..16]).unwrap(),
+        p2,
+    );
+    sse2::_mm_storeu_si128(
+        token,
+        <&mut [u8; 16]>::try_from(&mut pixels[point - 2 * stride..][..16]).unwrap(),
+        p1,
+    );
+    sse2::_mm_storeu_si128(
+        token,
+        <&mut [u8; 16]>::try_from(&mut pixels[point - stride..][..16]).unwrap(),
+        p0,
+    );
+    sse2::_mm_storeu_si128(
+        token,
+        <&mut [u8; 16]>::try_from(&mut pixels[point..][..16]).unwrap(),
+        q0,
+    );
+    sse2::_mm_storeu_si128(
+        token,
+        <&mut [u8; 16]>::try_from(&mut pixels[point + stride..][..16]).unwrap(),
+        q1,
+    );
+    sse2::_mm_storeu_si128(
+        token,
+        <&mut [u8; 16]>::try_from(&mut pixels[point + 2 * stride..][..16]).unwrap(),
+        q2,
+    );
 }
 
 /// Transpose 6 columns (p2, p1, p0, q0, q1, q2) of 16 bytes each back to 16 rows of 6 bytes.
 /// Returns values suitable for storing back to memory.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[arcane]
 #[inline(always)]
-unsafe fn transpose_6x16_to_16x6(
+fn transpose_6x16_to_16x6(
+    _token: impl HasSse41,
     p2: __m128i,
     p1: __m128i,
     p0: __m128i,
@@ -799,11 +1024,11 @@ unsafe fn transpose_6x16_to_16x6(
 /// Uses the transpose technique: load 16 rows × 8 columns, transpose,
 /// apply DoFilter4 logic, transpose back, store.
 ///
-/// # Safety
-/// Requires SSE4.1. Each row must have at least 4 bytes before and after the edge point.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse4.1")]
-pub unsafe fn normal_h_filter16_inner(
+/// Each row must have at least 4 bytes before and after the edge point.
+#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[arcane]
+pub fn normal_h_filter16_inner(
+    token: impl HasSse41 + Copy,
     pixels: &mut [u8],
     x: usize,
     y_start: usize,
@@ -817,11 +1042,14 @@ pub unsafe fn normal_h_filter16_inner(
     let mut rows = [_mm_setzero_si128(); 16];
     for (i, row) in rows.iter_mut().enumerate() {
         let row_start = (y_start + i) * stride + x - 4;
-        *row = _mm_loadl_epi64(pixels.as_ptr().add(row_start) as *const __m128i);
+        *row = sse2::_mm_loadu_si64(
+            token,
+            <&[u8; 8]>::try_from(&pixels[row_start..][..8]).unwrap(),
+        );
     }
 
     // Transpose 8x16 to 16x8: now we have 8 columns of 16 pixels each
-    let cols = transpose_8x16_to_16x8(&rows);
+    let cols = transpose_8x16_to_16x8(token, &rows);
     let p3 = cols[0];
     let p2 = cols[1];
     let mut p1 = cols[2];
@@ -832,22 +1060,37 @@ pub unsafe fn normal_h_filter16_inner(
     let q3 = cols[7];
 
     // Check if filtering is needed
-    let mask = needs_filter_normal_16(p3, p2, p1, p0, q0, q1, q2, q3, edge_limit, interior_limit);
+    let mask = needs_filter_normal_16(
+        token,
+        p3,
+        p2,
+        p1,
+        p0,
+        q0,
+        q1,
+        q2,
+        q3,
+        edge_limit,
+        interior_limit,
+    );
 
     // Check high edge variance
-    let hev = high_edge_variance_16(p1, p0, q0, q1, hev_thresh);
+    let hev = high_edge_variance_16(token, p1, p0, q0, q1, hev_thresh);
 
     // Apply filter
-    do_filter4_16(&mut p1, &mut p0, &mut q0, &mut q1, mask, hev);
+    do_filter4_16(token, &mut p1, &mut p0, &mut q0, &mut q1, mask, hev);
 
     // Transpose back: convert 4 columns of 16 to 16 rows of 4
-    let packed = transpose_4x16_to_16x4(p1, p0, q0, q1);
+    let packed = transpose_4x16_to_16x4(token, p1, p0, q0, q1);
 
     // Store 4 bytes per row (p1, p0, q0, q1)
     for (i, &val) in packed.iter().enumerate() {
         let row_start = (y_start + i) * stride + x - 2;
-        let ptr = pixels.as_mut_ptr().add(row_start) as *mut i32;
-        std::ptr::write_unaligned(ptr, val);
+        sse2::_mm_storeu_si32(
+            token,
+            <&mut [u8; 4]>::try_from(&mut pixels[row_start..][..4]).unwrap(),
+            _mm_cvtsi32_si128(val),
+        );
     }
 }
 
@@ -857,11 +1100,11 @@ pub unsafe fn normal_h_filter16_inner(
 /// Uses the transpose technique: load 16 rows × 8 columns, transpose,
 /// apply DoFilter6 logic, transpose back, store.
 ///
-/// # Safety
-/// Requires SSE4.1. Each row must have at least 4 bytes before and after the edge point.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse4.1")]
-pub unsafe fn normal_h_filter16_edge(
+/// Each row must have at least 4 bytes before and after the edge point.
+#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[arcane]
+pub fn normal_h_filter16_edge(
+    token: impl HasSse41 + Copy,
     pixels: &mut [u8],
     x: usize,
     y_start: usize,
@@ -874,11 +1117,14 @@ pub unsafe fn normal_h_filter16_edge(
     let mut rows = [_mm_setzero_si128(); 16];
     for (i, row) in rows.iter_mut().enumerate() {
         let row_start = (y_start + i) * stride + x - 4;
-        *row = _mm_loadl_epi64(pixels.as_ptr().add(row_start) as *const __m128i);
+        *row = sse2::_mm_loadu_si64(
+            token,
+            <&[u8; 8]>::try_from(&pixels[row_start..][..8]).unwrap(),
+        );
     }
 
     // Transpose 8x16 to 16x8
-    let cols = transpose_8x16_to_16x8(&rows);
+    let cols = transpose_8x16_to_16x8(token, &rows);
     let p3 = cols[0];
     let mut p2 = cols[1];
     let mut p1 = cols[2];
@@ -889,26 +1135,46 @@ pub unsafe fn normal_h_filter16_edge(
     let q3 = cols[7];
 
     // Check if filtering is needed
-    let mask = needs_filter_normal_16(p3, p2, p1, p0, q0, q1, q2, q3, edge_limit, interior_limit);
+    let mask = needs_filter_normal_16(
+        token,
+        p3,
+        p2,
+        p1,
+        p0,
+        q0,
+        q1,
+        q2,
+        q3,
+        edge_limit,
+        interior_limit,
+    );
 
     // Check high edge variance
-    let hev = high_edge_variance_16(p1, p0, q0, q1, hev_thresh);
+    let hev = high_edge_variance_16(token, p1, p0, q0, q1, hev_thresh);
 
     // Apply filter
-    do_filter6_16(&mut p2, &mut p1, &mut p0, &mut q0, &mut q1, &mut q2, mask, hev);
+    do_filter6_16(
+        token, &mut p2, &mut p1, &mut p0, &mut q0, &mut q1, &mut q2, mask, hev,
+    );
 
     // Transpose back: convert 6 columns of 16 to 16 rows of 6
-    let (packed4, packed2) = transpose_6x16_to_16x6(p2, p1, p0, q0, q1, q2);
+    let (packed4, packed2) = transpose_6x16_to_16x6(token, p2, p1, p0, q0, q1, q2);
 
     // Store 6 bytes per row (p2, p1, p0, q0, q1, q2)
     for (i, (&val4, &val2)) in packed4.iter().zip(packed2.iter()).enumerate() {
         let row_start = (y_start + i) * stride + x - 3;
         // Store first 4 bytes (p2, p1, p0, q0)
-        let ptr4 = pixels.as_mut_ptr().add(row_start) as *mut i32;
-        std::ptr::write_unaligned(ptr4, val4);
+        sse2::_mm_storeu_si32(
+            token,
+            <&mut [u8; 4]>::try_from(&mut pixels[row_start..][..4]).unwrap(),
+            _mm_cvtsi32_si128(val4),
+        );
         // Store next 2 bytes (q1, q2)
-        let ptr2 = pixels.as_mut_ptr().add(row_start + 4) as *mut i16;
-        std::ptr::write_unaligned(ptr2, val2);
+        sse2::_mm_storeu_si16(
+            token,
+            <&mut [u8; 2]>::try_from(&mut pixels[row_start + 4..][..2]).unwrap(),
+            _mm_cvtsi32_si128(val2 as i32),
+        );
     }
 }
 
@@ -920,11 +1186,11 @@ pub unsafe fn normal_h_filter16_edge(
 /// Apply normal horizontal filter (DoFilter6) to U and V planes together.
 /// Processes 8 U rows and 8 V rows as a single 16-row operation.
 ///
-/// # Safety
-/// Requires SSE4.1. Each row must have at least 4 bytes before and after the edge point.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse4.1")]
-pub unsafe fn normal_h_filter_uv_edge(
+/// Each row must have at least 4 bytes before and after the edge point.
+#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[arcane]
+pub fn normal_h_filter_uv_edge(
+    token: impl HasSse41 + Copy,
     u_pixels: &mut [u8],
     v_pixels: &mut [u8],
     x: usize,
@@ -938,12 +1204,18 @@ pub unsafe fn normal_h_filter_uv_edge(
     let mut rows = [_mm_setzero_si128(); 16];
     for i in 0..8 {
         let row_start = (y_start + i) * stride + x - 4;
-        rows[i] = _mm_loadl_epi64(u_pixels.as_ptr().add(row_start) as *const __m128i);
-        rows[i + 8] = _mm_loadl_epi64(v_pixels.as_ptr().add(row_start) as *const __m128i);
+        rows[i] = sse2::_mm_loadu_si64(
+            token,
+            <&[u8; 8]>::try_from(&u_pixels[row_start..][..8]).unwrap(),
+        );
+        rows[i + 8] = sse2::_mm_loadu_si64(
+            token,
+            <&[u8; 8]>::try_from(&v_pixels[row_start..][..8]).unwrap(),
+        );
     }
 
     // Transpose 8x16 to 16x8
-    let cols = transpose_8x16_to_16x8(&rows);
+    let cols = transpose_8x16_to_16x8(token, &rows);
     let p3 = cols[0];
     let mut p2 = cols[1];
     let mut p1 = cols[2];
@@ -954,42 +1226,68 @@ pub unsafe fn normal_h_filter_uv_edge(
     let q3 = cols[7];
 
     // Check if filtering is needed
-    let mask = needs_filter_normal_16(p3, p2, p1, p0, q0, q1, q2, q3, edge_limit, interior_limit);
+    let mask = needs_filter_normal_16(
+        token,
+        p3,
+        p2,
+        p1,
+        p0,
+        q0,
+        q1,
+        q2,
+        q3,
+        edge_limit,
+        interior_limit,
+    );
 
     // Check high edge variance
-    let hev = high_edge_variance_16(p1, p0, q0, q1, hev_thresh);
+    let hev = high_edge_variance_16(token, p1, p0, q0, q1, hev_thresh);
 
     // Apply DoFilter6
-    do_filter6_16(&mut p2, &mut p1, &mut p0, &mut q0, &mut q1, &mut q2, mask, hev);
+    do_filter6_16(
+        token, &mut p2, &mut p1, &mut p0, &mut q0, &mut q1, &mut q2, mask, hev,
+    );
 
     // Transpose 6 columns back to 16 rows of 6 bytes
-    let (vals4, vals2) = transpose_6x16_to_16x6(p2, p1, p0, q0, q1, q2);
+    let (vals4, vals2) = transpose_6x16_to_16x6(token, p2, p1, p0, q0, q1, q2);
 
     // Store 8 U rows and 8 V rows
     for i in 0..8 {
         let row_start = (y_start + i) * stride + x - 3;
-        let ptr4 = u_pixels.as_mut_ptr().add(row_start) as *mut i32;
-        std::ptr::write_unaligned(ptr4, vals4[i]);
-        let ptr2 = u_pixels.as_mut_ptr().add(row_start + 4) as *mut i16;
-        std::ptr::write_unaligned(ptr2, vals2[i]);
+        sse2::_mm_storeu_si32(
+            token,
+            <&mut [u8; 4]>::try_from(&mut u_pixels[row_start..][..4]).unwrap(),
+            _mm_cvtsi32_si128(vals4[i]),
+        );
+        sse2::_mm_storeu_si16(
+            token,
+            <&mut [u8; 2]>::try_from(&mut u_pixels[row_start + 4..][..2]).unwrap(),
+            _mm_cvtsi32_si128(vals2[i] as i32),
+        );
     }
     for i in 0..8 {
         let row_start = (y_start + i) * stride + x - 3;
-        let ptr4 = v_pixels.as_mut_ptr().add(row_start) as *mut i32;
-        std::ptr::write_unaligned(ptr4, vals4[i + 8]);
-        let ptr2 = v_pixels.as_mut_ptr().add(row_start + 4) as *mut i16;
-        std::ptr::write_unaligned(ptr2, vals2[i + 8]);
+        sse2::_mm_storeu_si32(
+            token,
+            <&mut [u8; 4]>::try_from(&mut v_pixels[row_start..][..4]).unwrap(),
+            _mm_cvtsi32_si128(vals4[i + 8]),
+        );
+        sse2::_mm_storeu_si16(
+            token,
+            <&mut [u8; 2]>::try_from(&mut v_pixels[row_start + 4..][..2]).unwrap(),
+            _mm_cvtsi32_si128(vals2[i + 8] as i32),
+        );
     }
 }
 
 /// Apply normal horizontal filter (DoFilter4) to U and V planes together at subblock edges.
 /// Processes 8 U rows and 8 V rows as a single 16-row operation.
 ///
-/// # Safety
-/// Requires SSE4.1. Each row must have at least 4 bytes before and after the edge point.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse4.1")]
-pub unsafe fn normal_h_filter_uv_inner(
+/// Each row must have at least 4 bytes before and after the edge point.
+#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[arcane]
+pub fn normal_h_filter_uv_inner(
+    token: impl HasSse41 + Copy,
     u_pixels: &mut [u8],
     v_pixels: &mut [u8],
     x: usize,
@@ -1003,12 +1301,18 @@ pub unsafe fn normal_h_filter_uv_inner(
     let mut rows = [_mm_setzero_si128(); 16];
     for i in 0..8 {
         let row_start = (y_start + i) * stride + x - 4;
-        rows[i] = _mm_loadl_epi64(u_pixels.as_ptr().add(row_start) as *const __m128i);
-        rows[i + 8] = _mm_loadl_epi64(v_pixels.as_ptr().add(row_start) as *const __m128i);
+        rows[i] = sse2::_mm_loadu_si64(
+            token,
+            <&[u8; 8]>::try_from(&u_pixels[row_start..][..8]).unwrap(),
+        );
+        rows[i + 8] = sse2::_mm_loadu_si64(
+            token,
+            <&[u8; 8]>::try_from(&v_pixels[row_start..][..8]).unwrap(),
+        );
     }
 
     // Transpose 8x16 to 16x8
-    let cols = transpose_8x16_to_16x8(&rows);
+    let cols = transpose_8x16_to_16x8(token, &rows);
     let p3 = cols[0];
     let p2 = cols[1];
     let mut p1 = cols[2];
@@ -1019,29 +1323,47 @@ pub unsafe fn normal_h_filter_uv_inner(
     let q3 = cols[7];
 
     // Check if filtering is needed
-    let mask = needs_filter_normal_16(p3, p2, p1, p0, q0, q1, q2, q3, edge_limit, interior_limit);
+    let mask = needs_filter_normal_16(
+        token,
+        p3,
+        p2,
+        p1,
+        p0,
+        q0,
+        q1,
+        q2,
+        q3,
+        edge_limit,
+        interior_limit,
+    );
 
     // Check high edge variance
-    let hev = high_edge_variance_16(p1, p0, q0, q1, hev_thresh);
+    let hev = high_edge_variance_16(token, p1, p0, q0, q1, hev_thresh);
 
     // Apply DoFilter4
-    do_filter4_16(&mut p1, &mut p0, &mut q0, &mut q1, mask, hev);
+    do_filter4_16(token, &mut p1, &mut p0, &mut q0, &mut q1, mask, hev);
 
     // Transpose 4 columns back to 16 rows of 4 bytes
-    let packed = transpose_4x16_to_16x4(p1, p0, q0, q1);
+    let packed = transpose_4x16_to_16x4(token, p1, p0, q0, q1);
 
     // Store 8 U rows and 8 V rows
     for i in 0..8 {
         let val = packed[i];
         let row_start = (y_start + i) * stride + x - 2;
-        let ptr = u_pixels.as_mut_ptr().add(row_start) as *mut i32;
-        std::ptr::write_unaligned(ptr, val);
+        sse2::_mm_storeu_si32(
+            token,
+            <&mut [u8; 4]>::try_from(&mut u_pixels[row_start..][..4]).unwrap(),
+            _mm_cvtsi32_si128(val),
+        );
     }
     for i in 0..8 {
         let val = packed[i + 8];
         let row_start = (y_start + i) * stride + x - 2;
-        let ptr = v_pixels.as_mut_ptr().add(row_start) as *mut i32;
-        std::ptr::write_unaligned(ptr, val);
+        sse2::_mm_storeu_si32(
+            token,
+            <&mut [u8; 4]>::try_from(&mut v_pixels[row_start..][..4]).unwrap(),
+            _mm_cvtsi32_si128(val),
+        );
     }
 }
 
@@ -1054,11 +1376,11 @@ pub unsafe fn normal_h_filter_uv_inner(
 /// Apply normal vertical filter (DoFilter6) to U and V planes together at macroblock edges.
 /// Processes 8 U pixels and 8 V pixels per row, packed into __m128i registers.
 ///
-/// # Safety
-/// Requires SSE4.1. Must have at least 4 rows before and after the point.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse4.1")]
-pub unsafe fn normal_v_filter_uv_edge(
+/// Must have at least 4 rows before and after the point.
+#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[arcane]
+pub fn normal_v_filter_uv_edge(
+    token: impl HasSse41 + Copy,
     u_pixels: &mut [u8],
     v_pixels: &mut [u8],
     point: usize,
@@ -1067,62 +1389,76 @@ pub unsafe fn normal_v_filter_uv_edge(
     interior_limit: i32,
     edge_limit: i32,
 ) {
-    // Load 8 rows, each containing 8 U + 8 V pixels packed together
-    // Low 64 bits = U, High 64 bits = V
-    let load_uv_row = |offset: isize| -> __m128i {
-        let u_ptr = u_pixels.as_ptr().offset(offset) as *const __m128i;
-        let v_ptr = v_pixels.as_ptr().offset(offset) as *const __m128i;
-        let u = _mm_loadl_epi64(u_ptr);
-        let v = _mm_loadl_epi64(v_ptr);
+    // Helper to load a row with 8 U + 8 V pixels packed together
+    let load_uv_row = |u_pix: &[u8], v_pix: &[u8], offset: usize| -> __m128i {
+        let u = sse2::_mm_loadu_si64(token, <&[u8; 8]>::try_from(&u_pix[offset..][..8]).unwrap());
+        let v = sse2::_mm_loadu_si64(token, <&[u8; 8]>::try_from(&v_pix[offset..][..8]).unwrap());
         _mm_unpacklo_epi64(u, v)
     };
 
-    let base = point as isize;
-    let s = stride as isize;
-
-    let p3 = load_uv_row(base - 4 * s);
-    let mut p2 = load_uv_row(base - 3 * s);
-    let mut p1 = load_uv_row(base - 2 * s);
-    let mut p0 = load_uv_row(base - s);
-    let mut q0 = load_uv_row(base);
-    let mut q1 = load_uv_row(base + s);
-    let mut q2 = load_uv_row(base + 2 * s);
-    let q3 = load_uv_row(base + 3 * s);
+    let p3 = load_uv_row(u_pixels, v_pixels, point - 4 * stride);
+    let mut p2 = load_uv_row(u_pixels, v_pixels, point - 3 * stride);
+    let mut p1 = load_uv_row(u_pixels, v_pixels, point - 2 * stride);
+    let mut p0 = load_uv_row(u_pixels, v_pixels, point - stride);
+    let mut q0 = load_uv_row(u_pixels, v_pixels, point);
+    let mut q1 = load_uv_row(u_pixels, v_pixels, point + stride);
+    let mut q2 = load_uv_row(u_pixels, v_pixels, point + 2 * stride);
+    let q3 = load_uv_row(u_pixels, v_pixels, point + 3 * stride);
 
     // Check if filtering is needed
-    let mask = needs_filter_normal_16(p3, p2, p1, p0, q0, q1, q2, q3, edge_limit, interior_limit);
+    let mask = needs_filter_normal_16(
+        token,
+        p3,
+        p2,
+        p1,
+        p0,
+        q0,
+        q1,
+        q2,
+        q3,
+        edge_limit,
+        interior_limit,
+    );
 
     // Check high edge variance
-    let hev = high_edge_variance_16(p1, p0, q0, q1, hev_thresh);
+    let hev = high_edge_variance_16(token, p1, p0, q0, q1, hev_thresh);
 
     // Apply DoFilter6
-    do_filter6_16(&mut p2, &mut p1, &mut p0, &mut q0, &mut q1, &mut q2, mask, hev);
+    do_filter6_16(
+        token, &mut p2, &mut p1, &mut p0, &mut q0, &mut q1, &mut q2, mask, hev,
+    );
 
-    // Store results back
-    // Low 64 bits go to U, high 64 bits go to V
-    let mut store_uv_row = |reg: __m128i, offset: isize| {
-        let u_ptr = u_pixels.as_mut_ptr().offset(offset) as *mut __m128i;
-        let v_ptr = v_pixels.as_mut_ptr().offset(offset) as *mut __m128i;
-        _mm_storel_epi64(u_ptr, reg);
-        _mm_storel_epi64(v_ptr, _mm_srli_si128(reg, 8));
-    };
+    // Store results back - low 64 bits to U, high 64 bits to V
+    let store_uv_row =
+        |u_pix: &mut [u8], v_pix: &mut [u8], offset: usize, reg: __m128i| {
+            sse2::_mm_storel_epi64(
+                token,
+                <&mut [u8; 16]>::try_from(&mut u_pix[offset..][..16]).unwrap(),
+                reg,
+            );
+            sse2::_mm_storel_epi64(
+                token,
+                <&mut [u8; 16]>::try_from(&mut v_pix[offset..][..16]).unwrap(),
+                _mm_srli_si128(reg, 8),
+            );
+        };
 
-    store_uv_row(p2, base - 3 * s);
-    store_uv_row(p1, base - 2 * s);
-    store_uv_row(p0, base - s);
-    store_uv_row(q0, base);
-    store_uv_row(q1, base + s);
-    store_uv_row(q2, base + 2 * s);
+    store_uv_row(u_pixels, v_pixels, point - 3 * stride, p2);
+    store_uv_row(u_pixels, v_pixels, point - 2 * stride, p1);
+    store_uv_row(u_pixels, v_pixels, point - stride, p0);
+    store_uv_row(u_pixels, v_pixels, point, q0);
+    store_uv_row(u_pixels, v_pixels, point + stride, q1);
+    store_uv_row(u_pixels, v_pixels, point + 2 * stride, q2);
 }
 
 /// Apply normal vertical filter (DoFilter4) to U and V planes together at subblock edges.
 /// Processes 8 U pixels and 8 V pixels per row, packed into __m128i registers.
 ///
-/// # Safety
-/// Requires SSE4.1. Must have at least 4 rows before and after the point.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse4.1")]
-pub unsafe fn normal_v_filter_uv_inner(
+/// Must have at least 4 rows before and after the point.
+#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[arcane]
+pub fn normal_v_filter_uv_inner(
+    token: impl HasSse41 + Copy,
     u_pixels: &mut [u8],
     v_pixels: &mut [u8],
     point: usize,
@@ -1131,53 +1467,69 @@ pub unsafe fn normal_v_filter_uv_inner(
     interior_limit: i32,
     edge_limit: i32,
 ) {
-    // Load 8 rows, each containing 8 U + 8 V pixels packed together
-    let load_uv_row = |offset: isize| -> __m128i {
-        let u_ptr = u_pixels.as_ptr().offset(offset) as *const __m128i;
-        let v_ptr = v_pixels.as_ptr().offset(offset) as *const __m128i;
-        let u = _mm_loadl_epi64(u_ptr);
-        let v = _mm_loadl_epi64(v_ptr);
+    // Helper to load a row with 8 U + 8 V pixels packed together
+    let load_uv_row = |u_pix: &[u8], v_pix: &[u8], offset: usize| -> __m128i {
+        let u = sse2::_mm_loadu_si64(token, <&[u8; 8]>::try_from(&u_pix[offset..][..8]).unwrap());
+        let v = sse2::_mm_loadu_si64(token, <&[u8; 8]>::try_from(&v_pix[offset..][..8]).unwrap());
         _mm_unpacklo_epi64(u, v)
     };
 
-    let base = point as isize;
-    let s = stride as isize;
-
-    let p3 = load_uv_row(base - 4 * s);
-    let p2 = load_uv_row(base - 3 * s);
-    let mut p1 = load_uv_row(base - 2 * s);
-    let mut p0 = load_uv_row(base - s);
-    let mut q0 = load_uv_row(base);
-    let mut q1 = load_uv_row(base + s);
-    let q2 = load_uv_row(base + 2 * s);
-    let q3 = load_uv_row(base + 3 * s);
+    let p3 = load_uv_row(u_pixels, v_pixels, point - 4 * stride);
+    let p2 = load_uv_row(u_pixels, v_pixels, point - 3 * stride);
+    let mut p1 = load_uv_row(u_pixels, v_pixels, point - 2 * stride);
+    let mut p0 = load_uv_row(u_pixels, v_pixels, point - stride);
+    let mut q0 = load_uv_row(u_pixels, v_pixels, point);
+    let mut q1 = load_uv_row(u_pixels, v_pixels, point + stride);
+    let q2 = load_uv_row(u_pixels, v_pixels, point + 2 * stride);
+    let q3 = load_uv_row(u_pixels, v_pixels, point + 3 * stride);
 
     // Check if filtering is needed
-    let mask = needs_filter_normal_16(p3, p2, p1, p0, q0, q1, q2, q3, edge_limit, interior_limit);
+    let mask = needs_filter_normal_16(
+        token,
+        p3,
+        p2,
+        p1,
+        p0,
+        q0,
+        q1,
+        q2,
+        q3,
+        edge_limit,
+        interior_limit,
+    );
 
     // Check high edge variance
-    let hev = high_edge_variance_16(p1, p0, q0, q1, hev_thresh);
+    let hev = high_edge_variance_16(token, p1, p0, q0, q1, hev_thresh);
 
     // Apply DoFilter4
-    do_filter4_16(&mut p1, &mut p0, &mut q0, &mut q1, mask, hev);
+    do_filter4_16(token, &mut p1, &mut p0, &mut q0, &mut q1, mask, hev);
 
-    // Store results back
-    let mut store_uv_row = |reg: __m128i, offset: isize| {
-        let u_ptr = u_pixels.as_mut_ptr().offset(offset) as *mut __m128i;
-        let v_ptr = v_pixels.as_mut_ptr().offset(offset) as *mut __m128i;
-        _mm_storel_epi64(u_ptr, reg);
-        _mm_storel_epi64(v_ptr, _mm_srli_si128(reg, 8));
-    };
+    // Store results back - low 64 bits to U, high 64 bits to V
+    let store_uv_row =
+        |u_pix: &mut [u8], v_pix: &mut [u8], offset: usize, reg: __m128i| {
+            sse2::_mm_storel_epi64(
+                token,
+                <&mut [u8; 16]>::try_from(&mut u_pix[offset..][..16]).unwrap(),
+                reg,
+            );
+            sse2::_mm_storel_epi64(
+                token,
+                <&mut [u8; 16]>::try_from(&mut v_pix[offset..][..16]).unwrap(),
+                _mm_srli_si128(reg, 8),
+            );
+        };
 
-    store_uv_row(p1, base - 2 * s);
-    store_uv_row(p0, base - s);
-    store_uv_row(q0, base);
-    store_uv_row(q1, base + s);
+    store_uv_row(u_pixels, v_pixels, point - 2 * stride, p1);
+    store_uv_row(u_pixels, v_pixels, point - stride, p0);
+    store_uv_row(u_pixels, v_pixels, point, q0);
+    store_uv_row(u_pixels, v_pixels, point + stride, q1);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+    use archmage::SimdToken;
 
     /// Reference scalar simple filter for comparison
     fn scalar_simple_filter(p1: u8, p0: u8, q0: u8, q1: u8, thresh: i32) -> (u8, u8) {
@@ -1207,10 +1559,11 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
     fn test_simple_v_filter16_matches_scalar() {
-        if !is_x86_feature_detected!("sse4.1") {
+        let Some(token) = archmage::Sse41Token::summon() else {
             return;
-        }
+        };
 
         let stride = 32;
         let mut pixels = vec![128u8; stride * 8];
@@ -1233,9 +1586,7 @@ mod tests {
         let thresh = 40;
 
         // Apply SIMD filter (edge between row 1 and row 2, so point = 2 * stride)
-        unsafe {
-            simple_v_filter16(&mut pixels, 2 * stride, stride, thresh);
-        }
+        simple_v_filter16(token, &mut pixels, 2 * stride, stride, thresh);
 
         // Apply scalar filter
         for x in 0..16 {
@@ -1262,10 +1613,11 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
     fn test_simple_h_filter16_matches_scalar() {
-        if !is_x86_feature_detected!("sse4.1") {
+        let Some(token) = archmage::Sse41Token::summon() else {
             return;
-        }
+        };
 
         let stride = 32;
         let mut pixels = vec![128u8; stride * 20];
@@ -1287,9 +1639,7 @@ mod tests {
         let thresh = 40;
 
         // Apply SIMD filter (edge at x=4)
-        unsafe {
-            simple_h_filter16(&mut pixels, 4, 0, stride, thresh);
-        }
+        simple_h_filter16(token, &mut pixels, 4, 0, stride, thresh);
 
         // Apply scalar filter
         for y in 0..16 {
@@ -1316,10 +1666,11 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
     fn test_normal_v_filter16_inner_matches_scalar() {
-        if !is_x86_feature_detected!("sse4.1") {
+        let Some(token) = archmage::Sse41Token::summon() else {
             return;
-        }
+        };
 
         let stride = 32;
         let mut pixels = vec![128u8; stride * 12];
@@ -1351,9 +1702,7 @@ mod tests {
         let edge_limit = 25;
 
         // Apply SIMD filter
-        unsafe {
-            normal_v_filter16_inner(&mut pixels, 4 * stride, stride, hev_thresh, interior_limit, edge_limit);
-        }
+        normal_v_filter16_inner(token, &mut pixels, 4 * stride, stride, hev_thresh, interior_limit, edge_limit);
 
         // Apply scalar filter
         for x in 0..16 {
@@ -1389,10 +1738,11 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
     fn test_normal_v_filter16_edge_matches_scalar() {
-        if !is_x86_feature_detected!("sse4.1") {
+        let Some(token) = archmage::Sse41Token::summon() else {
             return;
-        }
+        };
 
         let stride = 32;
         let mut pixels = vec![128u8; stride * 12];
@@ -1424,9 +1774,7 @@ mod tests {
         let edge_limit = 40;
 
         // Apply SIMD filter
-        unsafe {
-            normal_v_filter16_edge(&mut pixels, 4 * stride, stride, hev_thresh, interior_limit, edge_limit);
-        }
+        normal_v_filter16_edge(token, &mut pixels, 4 * stride, stride, hev_thresh, interior_limit, edge_limit);
 
         // Apply scalar filter
         for x in 0..16 {

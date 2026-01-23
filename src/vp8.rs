@@ -22,6 +22,9 @@ use crate::yuv;
 use super::vp8_bit_reader::{VP8HeaderBitReader, VP8Partitions};
 use super::{loop_filter, transform};
 
+#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+use archmage::SimdToken;
+
 /// Helper to apply simple horizontal filter to 16 rows with SIMD when available.
 /// Filters the vertical edge at column x0, processing all 16 rows at once.
 #[inline]
@@ -33,11 +36,9 @@ fn simple_filter_horizontal_16_rows(
     edge_limit: u8,
 ) {
     #[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
-    if is_x86_feature_detected!("sse4.1") {
+    if let Some(token) = archmage::Sse41Token::summon() {
         // Use the new 16-pixel-at-once approach with transpose
-        unsafe {
-            crate::loop_filter_avx2::simple_h_filter16(buf, x0, y_start, stride, i32::from(edge_limit));
-        }
+        crate::loop_filter_avx2::simple_h_filter16(token, buf, x0, y_start, stride, i32::from(edge_limit));
         return;
     }
 
@@ -59,12 +60,10 @@ fn simple_filter_vertical_16_cols(
     edge_limit: u8,
 ) {
     #[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
-    if is_x86_feature_detected!("sse4.1") {
+    if let Some(token) = archmage::Sse41Token::summon() {
         // Use the new 16-pixel-at-once approach
         let point = y0 * stride + x_start;
-        unsafe {
-            crate::loop_filter_avx2::simple_v_filter16(buf, point, stride, i32::from(edge_limit));
-        }
+        crate::loop_filter_avx2::simple_v_filter16(token, buf, point, stride, i32::from(edge_limit));
         return;
     }
 
@@ -88,16 +87,14 @@ fn normal_filter_vertical_mb_16_cols(
     edge_limit: u8,
 ) {
     #[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
-    if is_x86_feature_detected!("sse4.1") {
+    if let Some(token) = archmage::Sse41Token::summon() {
         let point = y0 * stride + x_start;
-        unsafe {
-            crate::loop_filter_avx2::normal_v_filter16_edge(
-                buf, point, stride,
-                i32::from(hev_threshold),
-                i32::from(interior_limit),
-                i32::from(edge_limit),
-            );
-        }
+        crate::loop_filter_avx2::normal_v_filter16_edge(
+            token, buf, point, stride,
+            i32::from(hev_threshold),
+            i32::from(interior_limit),
+            i32::from(edge_limit),
+        );
         return;
     }
 
@@ -127,16 +124,14 @@ fn normal_filter_vertical_sub_16_cols(
     edge_limit: u8,
 ) {
     #[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
-    if is_x86_feature_detected!("sse4.1") {
+    if let Some(token) = archmage::Sse41Token::summon() {
         let point = y0 * stride + x_start;
-        unsafe {
-            crate::loop_filter_avx2::normal_v_filter16_inner(
-                buf, point, stride,
-                i32::from(hev_threshold),
-                i32::from(interior_limit),
-                i32::from(edge_limit),
-            );
-        }
+        crate::loop_filter_avx2::normal_v_filter16_inner(
+            token, buf, point, stride,
+            i32::from(hev_threshold),
+            i32::from(interior_limit),
+            i32::from(edge_limit),
+        );
         return;
     }
 
@@ -167,15 +162,13 @@ fn normal_filter_horizontal_mb_16_rows(
     edge_limit: u8,
 ) {
     #[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
-    if is_x86_feature_detected!("sse4.1") {
-        unsafe {
-            crate::loop_filter_avx2::normal_h_filter16_edge(
-                buf, x0, y_start, stride,
-                i32::from(hev_threshold),
-                i32::from(interior_limit),
-                i32::from(edge_limit),
-            );
-        }
+    if let Some(token) = archmage::Sse41Token::summon() {
+        crate::loop_filter_avx2::normal_h_filter16_edge(
+            token, buf, x0, y_start, stride,
+            i32::from(hev_threshold),
+            i32::from(interior_limit),
+            i32::from(edge_limit),
+        );
         return;
     }
 
@@ -203,15 +196,13 @@ fn normal_filter_horizontal_sub_16_rows(
     edge_limit: u8,
 ) {
     #[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
-    if is_x86_feature_detected!("sse4.1") {
-        unsafe {
-            crate::loop_filter_avx2::normal_h_filter16_inner(
-                buf, x0, y_start, stride,
-                i32::from(hev_threshold),
-                i32::from(interior_limit),
-                i32::from(edge_limit),
-            );
-        }
+    if let Some(token) = archmage::Sse41Token::summon() {
+        crate::loop_filter_avx2::normal_h_filter16_inner(
+            token, buf, x0, y_start, stride,
+            i32::from(hev_threshold),
+            i32::from(interior_limit),
+            i32::from(edge_limit),
+        );
         return;
     }
 
@@ -241,15 +232,13 @@ fn normal_filter_horizontal_uv_mb(
     edge_limit: u8,
 ) {
     #[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
-    if is_x86_feature_detected!("sse4.1") {
-        unsafe {
-            crate::loop_filter_avx2::normal_h_filter_uv_edge(
-                u_buf, v_buf, x0, y_start, stride,
-                i32::from(hev_threshold),
-                i32::from(interior_limit),
-                i32::from(edge_limit),
-            );
-        }
+    if let Some(token) = archmage::Sse41Token::summon() {
+        crate::loop_filter_avx2::normal_h_filter_uv_edge(
+            token, u_buf, v_buf, x0, y_start, stride,
+            i32::from(hev_threshold),
+            i32::from(interior_limit),
+            i32::from(edge_limit),
+        );
         return;
     }
 
@@ -284,15 +273,13 @@ fn normal_filter_horizontal_uv_sub(
     edge_limit: u8,
 ) {
     #[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
-    if is_x86_feature_detected!("sse4.1") {
-        unsafe {
-            crate::loop_filter_avx2::normal_h_filter_uv_inner(
-                u_buf, v_buf, x0, y_start, stride,
-                i32::from(hev_threshold),
-                i32::from(interior_limit),
-                i32::from(edge_limit),
-            );
-        }
+    if let Some(token) = archmage::Sse41Token::summon() {
+        crate::loop_filter_avx2::normal_h_filter_uv_inner(
+            token, u_buf, v_buf, x0, y_start, stride,
+            i32::from(hev_threshold),
+            i32::from(interior_limit),
+            i32::from(edge_limit),
+        );
         return;
     }
 
@@ -328,16 +315,14 @@ fn normal_filter_vertical_uv_mb(
     edge_limit: u8,
 ) {
     #[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
-    if is_x86_feature_detected!("sse4.1") {
+    if let Some(token) = archmage::Sse41Token::summon() {
         let point = y0 * stride + x_start;
-        unsafe {
-            crate::loop_filter_avx2::normal_v_filter_uv_edge(
-                u_buf, v_buf, point, stride,
-                i32::from(hev_threshold),
-                i32::from(interior_limit),
-                i32::from(edge_limit),
-            );
-        }
+        crate::loop_filter_avx2::normal_v_filter_uv_edge(
+            token, u_buf, v_buf, point, stride,
+            i32::from(hev_threshold),
+            i32::from(interior_limit),
+            i32::from(edge_limit),
+        );
         return;
     }
 
@@ -377,16 +362,14 @@ fn normal_filter_vertical_uv_sub(
     edge_limit: u8,
 ) {
     #[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
-    if is_x86_feature_detected!("sse4.1") {
+    if let Some(token) = archmage::Sse41Token::summon() {
         let point = y0 * stride + x_start;
-        unsafe {
-            crate::loop_filter_avx2::normal_v_filter_uv_inner(
-                u_buf, v_buf, point, stride,
-                i32::from(hev_threshold),
-                i32::from(interior_limit),
-                i32::from(edge_limit),
-            );
-        }
+        crate::loop_filter_avx2::normal_v_filter_uv_inner(
+            token, u_buf, v_buf, point, stride,
+            i32::from(hev_threshold),
+            i32::from(interior_limit),
+            i32::from(edge_limit),
+        );
         return;
     }
 
