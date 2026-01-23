@@ -22,7 +22,7 @@ use crate::yuv;
 use super::vp8_bit_reader::{VP8HeaderBitReader, VP8Partitions};
 use super::{loop_filter, transform};
 
-#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 use archmage::SimdToken;
 
 /// Helper to apply simple horizontal filter to 16 rows with SIMD when available.
@@ -35,7 +35,7 @@ fn simple_filter_horizontal_16_rows(
     stride: usize,
     edge_limit: u8,
 ) {
-    #[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if let Some(token) = archmage::Sse41Token::try_new() {
         // Use the new 16-pixel-at-once approach with transpose
         crate::loop_filter_avx2::simple_h_filter16(token, buf, x0, y_start, stride, i32::from(edge_limit));
@@ -59,7 +59,7 @@ fn simple_filter_vertical_16_cols(
     stride: usize,
     edge_limit: u8,
 ) {
-    #[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if let Some(token) = archmage::Sse41Token::try_new() {
         // Use the new 16-pixel-at-once approach
         let point = y0 * stride + x_start;
@@ -86,7 +86,7 @@ fn normal_filter_vertical_mb_16_cols(
     interior_limit: u8,
     edge_limit: u8,
 ) {
-    #[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if let Some(token) = archmage::Sse41Token::try_new() {
         let point = y0 * stride + x_start;
         crate::loop_filter_avx2::normal_v_filter16_edge(
@@ -123,7 +123,7 @@ fn normal_filter_vertical_sub_16_cols(
     interior_limit: u8,
     edge_limit: u8,
 ) {
-    #[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if let Some(token) = archmage::Sse41Token::try_new() {
         let point = y0 * stride + x_start;
         crate::loop_filter_avx2::normal_v_filter16_inner(
@@ -161,7 +161,7 @@ fn normal_filter_horizontal_mb_16_rows(
     interior_limit: u8,
     edge_limit: u8,
 ) {
-    #[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if let Some(token) = archmage::Sse41Token::try_new() {
         crate::loop_filter_avx2::normal_h_filter16_edge(
             token, buf, x0, y_start, stride,
@@ -195,7 +195,7 @@ fn normal_filter_horizontal_sub_16_rows(
     interior_limit: u8,
     edge_limit: u8,
 ) {
-    #[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if let Some(token) = archmage::Sse41Token::try_new() {
         crate::loop_filter_avx2::normal_h_filter16_inner(
             token, buf, x0, y_start, stride,
@@ -231,7 +231,7 @@ fn normal_filter_horizontal_uv_mb(
     interior_limit: u8,
     edge_limit: u8,
 ) {
-    #[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if let Some(token) = archmage::Sse41Token::try_new() {
         crate::loop_filter_avx2::normal_h_filter_uv_edge(
             token, u_buf, v_buf, x0, y_start, stride,
@@ -272,7 +272,7 @@ fn normal_filter_horizontal_uv_sub(
     interior_limit: u8,
     edge_limit: u8,
 ) {
-    #[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if let Some(token) = archmage::Sse41Token::try_new() {
         crate::loop_filter_avx2::normal_h_filter_uv_inner(
             token, u_buf, v_buf, x0, y_start, stride,
@@ -314,7 +314,7 @@ fn normal_filter_vertical_uv_mb(
     interior_limit: u8,
     edge_limit: u8,
 ) {
-    #[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if let Some(token) = archmage::Sse41Token::try_new() {
         let point = y0 * stride + x_start;
         crate::loop_filter_avx2::normal_v_filter_uv_edge(
@@ -361,7 +361,7 @@ fn normal_filter_vertical_uv_sub(
     interior_limit: u8,
     edge_limit: u8,
 ) {
-    #[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if let Some(token) = archmage::Sse41Token::try_new() {
         let point = y0 * stride + x_start;
         crate::loop_filter_avx2::normal_v_filter_uv_inner(

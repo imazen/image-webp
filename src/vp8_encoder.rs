@@ -68,11 +68,11 @@ fn sse_16x16_luma(
     mby: usize,
     pred: &[u8; LUMA_BLOCK_SIZE],
 ) -> u32 {
-    #[cfg(feature = "unsafe-simd")]
+    #[cfg(feature = "simd")]
     {
         crate::simd_sse::sse_16x16_luma(src_y, src_width, mbx, mby, pred)
     }
-    #[cfg(not(feature = "unsafe-simd"))]
+    #[cfg(not(feature = "simd"))]
     {
         let mut sse = 0u32;
         let src_base = mby * 16 * src_width + mbx * 16;
@@ -99,11 +99,11 @@ fn sse_8x8_chroma(
     mby: usize,
     pred: &[u8; CHROMA_BLOCK_SIZE],
 ) -> u32 {
-    #[cfg(feature = "unsafe-simd")]
+    #[cfg(feature = "simd")]
     {
         crate::simd_sse::sse_8x8_chroma(src_uv, src_width, mbx, mby, pred)
     }
-    #[cfg(not(feature = "unsafe-simd"))]
+    #[cfg(not(feature = "simd"))]
     {
         let mut sse = 0u32;
         let src_base = mby * 8 * src_width + mbx * 8;
@@ -1958,9 +1958,9 @@ impl<W: Write> Vp8Encoder<W> {
                     transform::idct4x4(&mut dequantized);
 
                     // Compute SSE between source and reconstructed using SIMD
-                    #[cfg(feature = "unsafe-simd")]
+                    #[cfg(feature = "simd")]
                     let sse = crate::simd_sse::sse4x4_with_residual(&src_block, pred, &dequantized);
-                    #[cfg(not(feature = "unsafe-simd"))]
+                    #[cfg(not(feature = "simd"))]
                     let sse = {
                         let mut sum = 0u32;
                         for i in 0..16 {

@@ -186,13 +186,13 @@ const int32_t mask = (int32_t)(split - value) >> 31;  // -1 or 0
 
 ```bash
 # Quick decode benchmark
-cargo run --release --features "unsafe-simd,_profiling" --bin profile_decode
+cargo run --release --features "simd,_profiling" --bin profile_decode
 
 # Full test suite
-cargo test --release --features unsafe-simd
+cargo test --release --features simd
 
 # Profiling with perf
-perf record cargo run --release --features "unsafe-simd,_profiling" --bin profile_decode
+perf record cargo run --release --features "simd,_profiling" --bin profile_decode
 perf report
 ```
 

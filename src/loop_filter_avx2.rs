@@ -8,9 +8,9 @@
 
 #![allow(dead_code)]
 
-#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 use archmage::{arcane, Sse41Token};
-#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 use safe_unaligned_simd::x86_64 as simd_mem;
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::*;
@@ -18,7 +18,7 @@ use core::arch::x86_64::*;
 /// Compute the "needs filter" mask for simple filter.
 /// Returns a mask where each byte is 0xFF if the pixel should be filtered, 0x00 otherwise.
 /// Condition: |p0 - q0| * 2 + |p1 - q1| / 2 <= thresh
-#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 #[inline(always)]
 fn needs_filter_16(
@@ -53,7 +53,7 @@ fn needs_filter_16(
 
 /// Get the base delta for the simple filter: clamp(p1 - q1 + 3*(q0 - p0))
 /// Uses signed arithmetic with sign bit flipping.
-#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 #[inline(always)]
 fn get_base_delta_16(
@@ -83,7 +83,7 @@ fn get_base_delta_16(
 }
 
 /// Signed right shift by 3 for packed bytes (in signed domain).
-#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 #[inline(always)]
 fn signed_shift_right_3(_token: Sse41Token, v: __m128i) -> __m128i {
@@ -95,7 +95,7 @@ fn signed_shift_right_3(_token: Sse41Token, v: __m128i) -> __m128i {
 }
 
 /// Apply the simple filter to p0 and q0 given the filter value.
-#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 #[inline(always)]
 fn do_simple_filter_16(
@@ -136,7 +136,7 @@ fn do_simple_filter_16(
 ///
 /// Buffer must have at least point + stride + 16 bytes.
 /// point must be >= 2 * stride (for p1 access).
-#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 pub fn simple_v_filter16(
     _token: Sse41Token,
@@ -183,7 +183,7 @@ pub fn simple_v_filter16(
 /// Transpose an 8x16 matrix of bytes to 16x8.
 /// Input: 16 __m128i values, each containing 8 bytes (low 64 bits used).
 /// Output: 8 __m128i values, each containing 16 bytes.
-#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 #[inline(always)]
 fn transpose_8x16_to_16x8(_token: Sse41Token, rows: &[__m128i; 16]) -> [__m128i; 8] {
@@ -232,7 +232,7 @@ fn transpose_8x16_to_16x8(_token: Sse41Token, rows: &[__m128i; 16]) -> [__m128i;
 
 /// Transpose 4 columns (p1, p0, q0, q1) of 16 bytes each back to 16 rows of 4 bytes.
 /// Returns values suitable for storing as 32-bit integers per row.
-#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 #[inline(always)]
 fn transpose_4x16_to_16x4(
@@ -282,7 +282,7 @@ fn transpose_4x16_to_16x4(
 /// apply vertical filter logic, transpose back, store.
 ///
 /// Each row must have at least 4 bytes before and after the edge point.
-#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 pub fn simple_h_filter16(
     _token: Sse41Token,
@@ -335,7 +335,7 @@ pub fn simple_h_filter16(
 
 /// Apply simple vertical filter to entire macroblock edge (16 pixels).
 /// This is the main entry point for filtering horizontal edges between macroblocks.
-#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 pub fn simple_filter_mb_edge_v(
     _token: Sse41Token,
@@ -351,7 +351,7 @@ pub fn simple_filter_mb_edge_v(
 
 /// Apply simple horizontal filter to entire macroblock edge (16 rows).
 /// This is the main entry point for filtering vertical edges between macroblocks.
-#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 pub fn simple_filter_mb_edge_h(
     _token: Sse41Token,
@@ -368,7 +368,7 @@ pub fn simple_filter_mb_edge_h(
 
 /// Apply simple vertical filter to a subblock edge within a macroblock.
 /// y_offset is the row offset within the macroblock (4, 8, or 12).
-#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 pub fn simple_filter_subblock_edge_v(
     _token: Sse41Token,
@@ -385,7 +385,7 @@ pub fn simple_filter_subblock_edge_v(
 
 /// Apply simple horizontal filter to a subblock edge within a macroblock.
 /// x_offset is the column offset within the macroblock (4, 8, or 12).
-#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 pub fn simple_filter_subblock_edge_h(
     _token: Sse41Token,
@@ -407,7 +407,7 @@ pub fn simple_filter_subblock_edge_h(
 
 /// Check if pixels need filtering using the full normal filter threshold.
 /// Condition: simple_threshold AND all interior differences <= interior_limit
-#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
@@ -462,7 +462,7 @@ fn needs_filter_normal_16(
 }
 
 /// Check high edge variance: |p1 - p0| > thresh OR |q1 - q0| > thresh
-#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 #[inline(always)]
 fn high_edge_variance_16(
@@ -502,7 +502,7 @@ fn high_edge_variance_16(
 /// Apply the subblock/inner filter (DoFilter4 from libwebp).
 /// When hev=true: only modify p0, q0 (use outer taps)
 /// When hev=false: modify p1, p0, q0, q1
-#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 #[inline(always)]
 fn do_filter4_16(
@@ -571,7 +571,7 @@ fn do_filter4_16(
 }
 
 /// Signed right shift by 1 for packed bytes
-#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 #[inline(always)]
 fn signed_shift_right_1(_token: Sse41Token, v: __m128i) -> __m128i {
@@ -583,7 +583,7 @@ fn signed_shift_right_1(_token: Sse41Token, v: __m128i) -> __m128i {
 /// Apply the macroblock/outer filter (DoFilter6 from libwebp).
 /// When hev=true: only modify p0, q0 (use outer taps)
 /// When hev=false: modify p2, p1, p0, q0, q1, q2 with weighted filter
-#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
@@ -687,7 +687,7 @@ fn do_filter6_16(
 }
 
 /// Helper for filter6 wide path - processes 8 pixels in 16-bit precision
-#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 #[inline(always)]
 fn filter6_wide_half(
@@ -749,7 +749,7 @@ fn filter6_wide_half(
 
 /// Apply normal vertical filter (DoFilter4) to 16 pixels across a horizontal edge.
 /// This is for subblock edges within a macroblock.
-#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 pub fn normal_v_filter16_inner(
     _token: Sse41Token,
@@ -827,7 +827,7 @@ pub fn normal_v_filter16_inner(
 }
 
 /// Apply normal vertical filter (DoFilter6) to 16 pixels across a horizontal macroblock edge.
-#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 pub fn normal_v_filter16_edge(
     _token: Sse41Token,
@@ -916,7 +916,7 @@ pub fn normal_v_filter16_edge(
 
 /// Transpose 6 columns (p2, p1, p0, q0, q1, q2) of 16 bytes each back to 16 rows of 6 bytes.
 /// Returns values suitable for storing back to memory.
-#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 #[inline(always)]
 fn transpose_6x16_to_16x6(
@@ -993,7 +993,7 @@ fn transpose_6x16_to_16x6(
 /// apply DoFilter4 logic, transpose back, store.
 ///
 /// Each row must have at least 4 bytes before and after the edge point.
-#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 pub fn normal_h_filter16_inner(
     _token: Sse41Token,
@@ -1067,7 +1067,7 @@ pub fn normal_h_filter16_inner(
 /// apply DoFilter6 logic, transpose back, store.
 ///
 /// Each row must have at least 4 bytes before and after the edge point.
-#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 pub fn normal_h_filter16_edge(
     _token: Sse41Token,
@@ -1150,7 +1150,7 @@ pub fn normal_h_filter16_edge(
 /// Processes 8 U rows and 8 V rows as a single 16-row operation.
 ///
 /// Each row must have at least 4 bytes before and after the edge point.
-#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 pub fn normal_h_filter_uv_edge(
     _token: Sse41Token,
@@ -1241,7 +1241,7 @@ pub fn normal_h_filter_uv_edge(
 /// Processes 8 U rows and 8 V rows as a single 16-row operation.
 ///
 /// Each row must have at least 4 bytes before and after the edge point.
-#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 pub fn normal_h_filter_uv_inner(
     _token: Sse41Token,
@@ -1330,7 +1330,7 @@ pub fn normal_h_filter_uv_inner(
 /// Processes 8 U pixels and 8 V pixels per row, packed into __m128i registers.
 ///
 /// Must have at least 4 rows before and after the point.
-#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 pub fn normal_v_filter_uv_edge(
     _token: Sse41Token,
@@ -1406,7 +1406,7 @@ pub fn normal_v_filter_uv_edge(
 /// Processes 8 U pixels and 8 V pixels per row, packed into __m128i registers.
 ///
 /// Must have at least 4 rows before and after the point.
-#[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 pub fn normal_v_filter_uv_inner(
     _token: Sse41Token,
@@ -1477,7 +1477,7 @@ pub fn normal_v_filter_uv_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     use archmage::SimdToken;
 
     /// Reference scalar simple filter for comparison
@@ -1508,7 +1508,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     fn test_simple_v_filter16_matches_scalar() {
         let Some(token) = archmage::Sse41Token::summon() else {
             return;
@@ -1562,7 +1562,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     fn test_simple_h_filter16_matches_scalar() {
         let Some(token) = archmage::Sse41Token::summon() else {
             return;
@@ -1615,7 +1615,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     fn test_normal_v_filter16_inner_matches_scalar() {
         let Some(token) = archmage::Sse41Token::summon() else {
             return;
@@ -1687,7 +1687,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(all(feature = "unsafe-simd", target_arch = "x86_64"))]
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     fn test_normal_v_filter16_edge_matches_scalar() {
         let Some(token) = archmage::Sse41Token::summon() else {
             return;

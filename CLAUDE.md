@@ -111,7 +111,7 @@ Loop filter now uses SIMD for:
   - **16-bit arithmetic** using `_mm_mulhi_epu16` (8 values at once vs 4)
   - **SIMD RGB interleaving** via `planar_to_24b` (6 stores vs 48)
   - Processes 32 pixels at a time (simple) or 16 (fancy upsampling)
-  - `unsafe-simd` feature now enabled by default
+  - `simd` feature now enabled by default
 - `src/loop_filter_avx2.rs` - SSE4.1 loop filter (16 pixels at once)
   - **Normal filter SIMD for both V and H edges** (luma, commit fc4c33f)
   - **Chroma horizontal SIMD** - U+V processed together as 16 rows (commit c3b9051)

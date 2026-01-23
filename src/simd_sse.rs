@@ -5,17 +5,17 @@
 //!
 //! Uses archmage for safe SIMD intrinsics with token-based CPU feature verification.
 
-#[cfg(all(target_arch = "x86_64", feature = "unsafe-simd"))]
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
 use archmage::{arcane, Has128BitSimd, Sse41Token, SimdToken};
-#[cfg(all(target_arch = "x86_64", feature = "unsafe-simd"))]
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
 use safe_unaligned_simd::x86_64 as simd_mem;
-#[cfg(all(target_arch = "x86_64", feature = "unsafe-simd"))]
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
 use core::arch::x86_64::*;
 
 /// Compute Sum of Squared Errors between two 4x4 blocks
 ///
 /// Both blocks are stored in row-major order as 16 bytes.
-#[cfg(feature = "unsafe-simd")]
+#[cfg(feature = "simd")]
 #[multiversed::multiversed("x86-64-v4", "x86-64-v3", "x86-64-v2")]
 pub fn sse4x4(a: &[u8; 16], b: &[u8; 16]) -> u32 {
     // Scalar fallback for non-x86 or when no SIMD available
@@ -48,7 +48,7 @@ pub fn sse4x4_scalar(a: &[u8; 16], b: &[u8; 16]) -> u32 {
 }
 
 /// SSE2 implementation of 4x4 block SSE
-#[cfg(all(target_arch = "x86_64", feature = "unsafe-simd"))]
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
 #[arcane]
 #[allow(dead_code)]
 fn sse4x4_sse2(_token: impl Has128BitSimd + Copy, a: &[u8; 16], b: &[u8; 16]) -> u32 {
@@ -87,7 +87,7 @@ fn sse4x4_sse2(_token: impl Has128BitSimd + Copy, a: &[u8; 16], b: &[u8; 16]) ->
 /// Compute SSE between a source block and a reconstructed block (pred + residual)
 ///
 /// This is used for RD scoring where we need SSE(src, pred + idct(quantized))
-#[cfg(feature = "unsafe-simd")]
+#[cfg(feature = "simd")]
 #[multiversed::multiversed("x86-64-v4", "x86-64-v3", "x86-64-v2")]
 pub fn sse4x4_with_residual(src: &[u8; 16], pred: &[u8; 16], residual: &[i32; 16]) -> u32 {
     #[cfg(not(target_arch = "x86_64"))]
@@ -119,7 +119,7 @@ pub fn sse4x4_with_residual_scalar(src: &[u8; 16], pred: &[u8; 16], residual: &[
 }
 
 /// SSE2 implementation of SSE with residual
-#[cfg(all(target_arch = "x86_64", feature = "unsafe-simd"))]
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
 #[arcane]
 #[allow(dead_code)]
 fn sse4x4_with_residual_sse2(
@@ -183,7 +183,7 @@ use crate::vp8_prediction::{CHROMA_BLOCK_SIZE, CHROMA_STRIDE, LUMA_BLOCK_SIZE, L
 ///
 /// Source is in a contiguous row-major array with `src_width` stride.
 /// Prediction is in a bordered buffer with LUMA_STRIDE stride and 1-pixel border.
-#[cfg(feature = "unsafe-simd")]
+#[cfg(feature = "simd")]
 #[multiversed::multiversed("x86-64-v4", "x86-64-v3", "x86-64-v2")]
 pub fn sse_16x16_luma(
     src_y: &[u8],
@@ -233,7 +233,7 @@ pub fn sse_16x16_luma_scalar(
 }
 
 /// SSE2 implementation of 16x16 luma SSE
-#[cfg(all(target_arch = "x86_64", feature = "unsafe-simd"))]
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
 #[arcane]
 #[allow(dead_code)]
 fn sse_16x16_luma_sse2(
@@ -286,7 +286,7 @@ fn sse_16x16_luma_sse2(
 }
 
 /// Compute SSE for an 8x8 chroma block between source and bordered prediction buffer
-#[cfg(feature = "unsafe-simd")]
+#[cfg(feature = "simd")]
 #[multiversed::multiversed("x86-64-v4", "x86-64-v3", "x86-64-v2")]
 pub fn sse_8x8_chroma(
     src_uv: &[u8],
@@ -336,7 +336,7 @@ pub fn sse_8x8_chroma_scalar(
 }
 
 /// SSE2 implementation of 8x8 chroma SSE
-#[cfg(all(target_arch = "x86_64", feature = "unsafe-simd"))]
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
 #[arcane]
 #[allow(dead_code)]
 fn sse_8x8_chroma_sse2(
@@ -427,7 +427,7 @@ pub fn t_transform_scalar(input: &[u8], stride: usize, w: &[u16; 16]) -> i32 {
 }
 
 /// SIMD-accelerated TTransform using SSE2
-#[cfg(feature = "unsafe-simd")]
+#[cfg(feature = "simd")]
 #[multiversed::multiversed("x86-64-v4", "x86-64-v3", "x86-64-v2")]
 pub fn t_transform(input: &[u8], stride: usize, w: &[u16; 16]) -> i32 {
     #[cfg(not(target_arch = "x86_64"))]
@@ -446,7 +446,7 @@ pub fn t_transform(input: &[u8], stride: usize, w: &[u16; 16]) -> i32 {
 }
 
 /// SSE2 implementation of TTransform
-#[cfg(all(target_arch = "x86_64", feature = "unsafe-simd"))]
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
 #[arcane]
 #[allow(dead_code)]
 fn t_transform_sse2(_token: impl Has128BitSimd + Copy, input: &[u8], stride: usize, w: &[u16; 16]) -> i32 {
@@ -553,7 +553,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "unsafe-simd")]
+    #[cfg(feature = "simd")]
     fn test_sse4x4_simd_matches_scalar() {
         let a: [u8; 16] = [
             10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160,
@@ -576,7 +576,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "unsafe-simd")]
+    #[cfg(feature = "simd")]
     fn test_sse4x4_with_residual_simd_matches_scalar() {
         let src: [u8; 16] = [
             100, 110, 120, 130, 90, 80, 70, 60, 50, 40, 30, 20, 10, 5, 3, 1,
@@ -617,7 +617,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "unsafe-simd")]
+    #[cfg(feature = "simd")]
     fn test_sse_16x16_luma_simd_matches_scalar() {
         let src_width = 32;
         let mut src_y = vec![0u8; 32 * 32];
@@ -663,7 +663,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "unsafe-simd")]
+    #[cfg(feature = "simd")]
     fn test_sse_8x8_chroma_simd_matches_scalar() {
         let src_width = 16;
         let mut src_uv = vec![0u8; 16 * 16];
@@ -725,7 +725,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "unsafe-simd")]
+    #[cfg(feature = "simd")]
     fn test_t_transform_simd_matches_scalar() {
         // Create a varied 4x4 block
         let mut input = [0u8; 64];
@@ -748,7 +748,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "unsafe-simd")]
+    #[cfg(feature = "simd")]
     fn test_t_transform_simd_matches_scalar_varied() {
         // Test with different strides and values
         for stride in [4, 8, 16, 32] {
