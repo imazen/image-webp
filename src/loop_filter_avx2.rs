@@ -912,6 +912,139 @@ pub unsafe fn normal_h_filter16_edge(
     }
 }
 
+// ============================================================================
+// 8-row chroma filter functions
+// These process both U and V planes together as 16 rows for efficiency.
+// ============================================================================
+
+/// Apply normal horizontal filter (DoFilter6) to U and V planes together.
+/// Processes 8 U rows and 8 V rows as a single 16-row operation.
+///
+/// # Safety
+/// Requires SSE4.1. Each row must have at least 4 bytes before and after the edge point.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse4.1")]
+pub unsafe fn normal_h_filter_uv_edge(
+    u_pixels: &mut [u8],
+    v_pixels: &mut [u8],
+    x: usize,
+    y_start: usize,
+    stride: usize,
+    hev_thresh: i32,
+    interior_limit: i32,
+    edge_limit: i32,
+) {
+    // Load 8 U rows and 8 V rows into a 16-row array
+    let mut rows = [_mm_setzero_si128(); 16];
+    for i in 0..8 {
+        let row_start = (y_start + i) * stride + x - 4;
+        rows[i] = _mm_loadl_epi64(u_pixels.as_ptr().add(row_start) as *const __m128i);
+        rows[i + 8] = _mm_loadl_epi64(v_pixels.as_ptr().add(row_start) as *const __m128i);
+    }
+
+    // Transpose 8x16 to 16x8
+    let cols = transpose_8x16_to_16x8(&rows);
+    let p3 = cols[0];
+    let mut p2 = cols[1];
+    let mut p1 = cols[2];
+    let mut p0 = cols[3];
+    let mut q0 = cols[4];
+    let mut q1 = cols[5];
+    let mut q2 = cols[6];
+    let q3 = cols[7];
+
+    // Check if filtering is needed
+    let mask = needs_filter_normal_16(p3, p2, p1, p0, q0, q1, q2, q3, edge_limit, interior_limit);
+
+    // Check high edge variance
+    let hev = high_edge_variance_16(p1, p0, q0, q1, hev_thresh);
+
+    // Apply DoFilter6
+    do_filter6_16(&mut p2, &mut p1, &mut p0, &mut q0, &mut q1, &mut q2, mask, hev);
+
+    // Transpose 6 columns back to 16 rows of 6 bytes
+    let (vals4, vals2) = transpose_6x16_to_16x6(p2, p1, p0, q0, q1, q2);
+
+    // Store 8 U rows and 8 V rows
+    for i in 0..8 {
+        let row_start = (y_start + i) * stride + x - 3;
+        let ptr4 = u_pixels.as_mut_ptr().add(row_start) as *mut i32;
+        std::ptr::write_unaligned(ptr4, vals4[i]);
+        let ptr2 = u_pixels.as_mut_ptr().add(row_start + 4) as *mut i16;
+        std::ptr::write_unaligned(ptr2, vals2[i]);
+    }
+    for i in 0..8 {
+        let row_start = (y_start + i) * stride + x - 3;
+        let ptr4 = v_pixels.as_mut_ptr().add(row_start) as *mut i32;
+        std::ptr::write_unaligned(ptr4, vals4[i + 8]);
+        let ptr2 = v_pixels.as_mut_ptr().add(row_start + 4) as *mut i16;
+        std::ptr::write_unaligned(ptr2, vals2[i + 8]);
+    }
+}
+
+/// Apply normal horizontal filter (DoFilter4) to U and V planes together at subblock edges.
+/// Processes 8 U rows and 8 V rows as a single 16-row operation.
+///
+/// # Safety
+/// Requires SSE4.1. Each row must have at least 4 bytes before and after the edge point.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse4.1")]
+pub unsafe fn normal_h_filter_uv_inner(
+    u_pixels: &mut [u8],
+    v_pixels: &mut [u8],
+    x: usize,
+    y_start: usize,
+    stride: usize,
+    hev_thresh: i32,
+    interior_limit: i32,
+    edge_limit: i32,
+) {
+    // Load 8 U rows and 8 V rows
+    let mut rows = [_mm_setzero_si128(); 16];
+    for i in 0..8 {
+        let row_start = (y_start + i) * stride + x - 4;
+        rows[i] = _mm_loadl_epi64(u_pixels.as_ptr().add(row_start) as *const __m128i);
+        rows[i + 8] = _mm_loadl_epi64(v_pixels.as_ptr().add(row_start) as *const __m128i);
+    }
+
+    // Transpose 8x16 to 16x8
+    let cols = transpose_8x16_to_16x8(&rows);
+    let p3 = cols[0];
+    let p2 = cols[1];
+    let mut p1 = cols[2];
+    let mut p0 = cols[3];
+    let mut q0 = cols[4];
+    let mut q1 = cols[5];
+    let q2 = cols[6];
+    let q3 = cols[7];
+
+    // Check if filtering is needed
+    let mask = needs_filter_normal_16(p3, p2, p1, p0, q0, q1, q2, q3, edge_limit, interior_limit);
+
+    // Check high edge variance
+    let hev = high_edge_variance_16(p1, p0, q0, q1, hev_thresh);
+
+    // Apply DoFilter4
+    do_filter4_16(&mut p1, &mut p0, &mut q0, &mut q1, mask, hev);
+
+    // Transpose 4 columns back to 16 rows of 4 bytes
+    let packed = transpose_4x16_to_16x4(p1, p0, q0, q1);
+
+    // Store 8 U rows and 8 V rows
+    for i in 0..8 {
+        let val = packed[i];
+        let row_start = (y_start + i) * stride + x - 2;
+        let ptr = u_pixels.as_mut_ptr().add(row_start) as *mut i32;
+        std::ptr::write_unaligned(ptr, val);
+    }
+    for i in 0..8 {
+        let val = packed[i + 8];
+        let row_start = (y_start + i) * stride + x - 2;
+        let ptr = v_pixels.as_mut_ptr().add(row_start) as *mut i32;
+        std::ptr::write_unaligned(ptr, val);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
