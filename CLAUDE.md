@@ -45,12 +45,13 @@ See global ~/.claude/CLAUDE.md for general instructions.
 
 | Test | Our Decoder | libwebp | Speed Ratio |
 |------|-------------|---------|-------------|
-| libwebp-encoded | 4.98ms (79 MPix/s) | 3.04ms (129 MPix/s) | 1.64x slower |
-| our-encoded | 4.49ms (88 MPix/s) | 2.87ms (137 MPix/s) | 1.56x slower |
+| libwebp-encoded | 4.7ms (84 MPix/s) | 3.0ms (131 MPix/s) | 1.55x slower |
+| our-encoded | 4.5ms (87 MPix/s) | 3.0ms (131 MPix/s) | 1.50x slower |
 
 *Benchmark: 768x512 Kodak image, 100 iterations, release mode*
 
-Our decoder is ~1.5-1.6x slower than libwebp (improved from 2.5x baseline). Recent optimizations:
+Our decoder is ~1.5x slower than libwebp (improved from 2.5x baseline). Recent optimizations:
+- **Position-indexed probability table** - eliminates COEFF_BANDS lookup (10% instruction reduction, commit 15b3771)
 - **VP8HeaderBitReader for mode parsing** - replaces ArithmeticDecoder (6-8% faster, commit 9b6f963)
 - **SIMD chroma horizontal loop filter** - U+V processed together as 16 rows (7.8% instruction reduction, commit c3b9051)
 - **DC-only IDCT fast path** and reusable coefficient buffer (commit 9d08433)
@@ -74,10 +75,13 @@ Our decoder is ~1.5-1.6x slower than libwebp (improved from 2.5x baseline). Rece
 
 ### Detailed Callgrind/Cachegrind Analysis (2026-01-23)
 
-**Per-decode instruction count (after VP8HeaderBitReader, commit 9b6f963):**
+**Per-decode instruction count (after position-indexed probs, commit 15b3771):**
 | Metric | Ours | libwebp | Ratio |
 |--------|------|---------|-------|
-| Instructions | ~72.2M | 46.6M | **1.55x** |
+| Coeff reading | 49.1M | 36.4M | 1.35x |
+| Total program | 23.2B/200 | - | -10.3% vs before |
+
+*Total instructions reduced from 25.87B → 23.20B (-10.3%)*
 | Memory reads | ~12M | 6.7M | 1.8x |
 | Memory writes | ~9M | 4.9M | 1.8x |
 | D1 read miss % | 0.33% | 0.70% | Better! |
@@ -123,16 +127,13 @@ Loop filter now uses SIMD for:
 ### TODO - Remaining Optimization Opportunities
 Priority ordered by instruction savings potential:
 
-1. **Reduce coefficient reading overhead** (~3.5M savings)
-   - Still ~17% more instructions than libwebp
-   - May be Rust abstraction overhead or bounds checking
-
-2. **Loop filter overhead** (~10M savings)
+1. **Loop filter overhead** (~10M savings)
    - Still 2.5x more instructions than libwebp despite SIMD
    - Per-pixel threshold checks (`should_filter_*`) are expensive
    - Consider batch threshold computation
 
 Completed:
+- [x] ~~Position-indexed probability table~~ (commit 15b3771) - 10% instruction reduction
 - [x] ~~Replace ArithmeticDecoder for mode parsing~~ (commit 9b6f963) - 6-8% faster
 - [x] ~~Loop filter SIMD for chroma~~ (commit c3b9051) - U+V together as 16 rows, 7.8% reduction
 - [x] ~~DC-only IDCT and reusable coefficient buffer~~ (commit 9d08433)
