@@ -43,14 +43,14 @@ fn quality_to_compression(quality: u8) -> f64 {
         2.0 * c - 1.0
     };
     // File size roughly scales as pow(quantizer, 3), so we use inverse
-    libm::pow(linear_c, 1.0 / 3.0)
+    crate::fast_math::cbrt(linear_c)
 }
 
 /// Convert user-facing quality (0-100) to internal quant index (0-127)
 /// Ported from libwebp's VP8SetSegmentParams().
 fn quality_to_quant_index(quality: u8) -> u8 {
     let c = quality_to_compression(quality);
-    let q = libm::round(127.0 * (1.0 - c)) as i32;
+    let q = crate::fast_math::round(127.0 * (1.0 - c)) as i32;
     q.clamp(0, 127) as u8
 }
 

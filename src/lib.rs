@@ -106,6 +106,7 @@ mod lossless_transform;
 
 // Encoder modules - now work with alloc (no std required)
 mod encoder;
+mod fast_math;
 mod vec_writer;
 mod vp8_arithmetic_encoder;
 mod vp8_cost;

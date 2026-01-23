@@ -638,7 +638,7 @@ impl EncoderConfig {
         EncoderParams {
             use_predictor_transform: true,
             use_lossy: !self.lossless,
-            lossy_quality: libm::roundf(self.quality) as u8,
+            lossy_quality: crate::fast_math::roundf(self.quality) as u8,
             method: self.method,
         }
     }

@@ -3219,7 +3219,7 @@ pub fn compute_segment_quant(base_quant: u8, segment_alpha: i32, sns_strength: u
     let c_base = 1.0 - (base_quant as f64 / 127.0);
 
     // Apply power-law modulation
-    let c = libm::pow(c_base, expn);
+    let c = crate::fast_math::pow(c_base, expn);
 
     // Convert back to quantizer index
     let q = (127.0 * (1.0 - c)) as i32;
