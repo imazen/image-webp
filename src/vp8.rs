@@ -388,6 +388,12 @@ const KEYFRAME_UV_MODE_NODES: [TreeNode; 3] =
 
 type TokenProbTreeNodes = [[[[TreeNode; NUM_DCT_TOKENS - 1]; 3]; 8]; 4];
 
+/// Position-indexed probability table for faster coefficient reading.
+/// Indexed by [plane][coeff_position][context] instead of [plane][band][context].
+/// This eliminates the COEFF_BANDS lookup in the hot path.
+/// Position 16 is a sentinel (copies band 7) for n+1 lookahead.
+type TokenProbsByPosition = [[[[TreeNode; NUM_DCT_TOKENS - 1]; 3]; 17]; 4];
+
 const COEFF_PROB_NODES: TokenProbTreeNodes = {
     let mut output = [[[[TreeNode::UNINIT; 11]; 3]; 8]; 4];
     let mut i = 0;
@@ -565,6 +571,8 @@ pub struct Vp8Decoder<R> {
 
     segment_tree_nodes: [TreeNode; 3],
     token_probs: Box<TokenProbTreeNodes>,
+    /// Position-indexed probability table (populated from token_probs after parsing)
+    token_probs_by_pos: Box<TokenProbsByPosition>,
 
     // Section 9.11
     prob_skip_false: Option<Prob>,
@@ -630,6 +638,7 @@ impl<R: Read> Vp8Decoder<R> {
 
             segment_tree_nodes: SEGMENT_TREE_NODE_DEFAULTS,
             token_probs: Box::new(COEFF_PROB_NODES),
+            token_probs_by_pos: Box::new([[[[TreeNode::UNINIT; 11]; 3]; 17]; 4]),
 
             // Section 9.11
             prob_skip_false: None,
@@ -671,6 +680,25 @@ impl<R: Read> Vp8Decoder<R> {
             }
         }
         self.b.check(())
+    }
+
+    /// Populate the position-indexed probability table from token_probs.
+    /// This eliminates the COEFF_BANDS lookup in the coefficient reading hot path.
+    fn populate_probs_by_position(&mut self) {
+        for plane in 0..4 {
+            for pos in 0..17 {
+                // Position 16 uses band 7 (sentinel for n+1 lookahead)
+                let band = if pos < 16 {
+                    COEFF_BANDS[pos] as usize
+                } else {
+                    7
+                };
+                for ctx in 0..3 {
+                    self.token_probs_by_pos[plane][pos][ctx] =
+                        self.token_probs[plane][band][ctx];
+                }
+            }
+        }
     }
 
     fn init_partitions(&mut self, n: usize) -> Result<(), DecodingError> {
@@ -928,6 +956,7 @@ impl<R: Read> Vp8Decoder<R> {
         let _ = self.b.read_literal(1);
 
         self.update_token_probabilities()?;
+        self.populate_probs_by_position();
 
         let mb_no_skip_coeff = self.b.read_literal(1);
         self.prob_skip_false = if mb_no_skip_coeff == 1 {
@@ -1142,12 +1171,13 @@ impl<R: Read> Vp8Decoder<R> {
         debug_assert!(complexity <= 2);
 
         let first = if plane == Plane::YCoeff1 { 1 } else { 0 };
-        let probs = &self.token_probs[plane as usize];
+        // Use position-indexed table to avoid COEFF_BANDS lookup in hot path
+        let probs = &self.token_probs_by_pos[plane as usize];
         let mut reader = self.partitions.reader(p);
 
         let mut n = first;
-        let mut band = COEFF_BANDS[n] as usize;
-        let mut prob = &probs[band][complexity];
+        // Direct position indexing - compiler can prove n < 17
+        let mut prob = &probs[n][complexity];
 
         while n < 16 {
             if reader.get_bit(prob[0].prob) == 0 {
@@ -1162,8 +1192,7 @@ impl<R: Read> Vp8Decoder<R> {
                     }
                     return Ok(true);
                 }
-                band = COEFF_BANDS[n] as usize;
-                prob = &probs[band][0];
+                prob = &probs[n][0];
             }
 
             let v: i32;
@@ -1213,8 +1242,7 @@ impl<R: Read> Vp8Decoder<R> {
 
             n += 1;
             if n < 16 {
-                band = COEFF_BANDS[n] as usize;
-                prob = &probs[band][next_ctx];
+                prob = &probs[n][next_ctx];
             }
         }
 
@@ -1238,12 +1266,13 @@ impl<R: Read> Vp8Decoder<R> {
         debug_assert!(complexity <= 2);
 
         let first = if plane == Plane::YCoeff1 { 1 } else { 0 };
-        let probs = &self.token_probs[plane as usize];
+        // Use position-indexed table to avoid COEFF_BANDS lookup in hot path
+        let probs = &self.token_probs_by_pos[plane as usize];
         let mut reader = self.partitions.reader(p);
 
         let mut n = first;
-        let mut band = COEFF_BANDS[n] as usize;
-        let mut prob = &probs[band][complexity];
+        // Direct position indexing - compiler can prove n < 17
+        let mut prob = &probs[n][complexity];
 
         while n < 16 {
             if reader.get_bit(prob[0].prob) == 0 {
@@ -1258,8 +1287,7 @@ impl<R: Read> Vp8Decoder<R> {
                     }
                     return Ok(true);
                 }
-                band = COEFF_BANDS[n] as usize;
-                prob = &probs[band][0];
+                prob = &probs[n][0];
             }
 
             let v: i32;
@@ -1309,8 +1337,7 @@ impl<R: Read> Vp8Decoder<R> {
 
             n += 1;
             if n < 16 {
-                band = COEFF_BANDS[n] as usize;
-                prob = &probs[band][next_ctx];
+                prob = &probs[n][next_ctx];
             }
         }
 
