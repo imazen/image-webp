@@ -82,6 +82,14 @@ The 2.8x slowdown is pure instruction count, not memory access patterns.
 - `src/simd_sse.rs` - SIMD implementations
 - `src/encoder.rs` - Public API, EncoderParams
 
+### no_std Support (2026-01-23)
+
+The crate supports `no_std` environments with the `alloc` crate:
+- `cargo build --no-default-features` for no_std
+- Error types (`DecodingError`, `EncodingError`) always available
+- Stream-based APIs (`WebPDecoder`, `WebPEncoder`, etc.) require `std` feature
+- Dependencies: `thiserror` (no_std), `whereat` (no_std), `hashbrown` (no_std HashMap)
+
 ### Decoder Performance vs libwebp (2026-01-23)
 
 | Test | Our Decoder | libwebp | Speed Ratio |
