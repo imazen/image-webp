@@ -534,6 +534,196 @@ fn t_transform_sse2(_token: impl Has128BitSimd + Copy, input: &[u8], stride: usi
     sum
 }
 
+//------------------------------------------------------------------------------
+// Residual Cost SIMD Precomputation
+//
+// Port of libwebp's GetResidualCost_SSE2 - precomputes absolute values,
+// contexts, and clamped levels using SIMD for faster coefficient cost calculation.
+
+/// Maximum variable level for context clamping (matches libwebp's MAX_VARIABLE_LEVEL)
+const MAX_VARIABLE_LEVEL: u8 = 67;
+
+/// Precomputed coefficient data for fast residual cost calculation
+#[derive(Clone)]
+pub struct PrecomputedCoeffs {
+    /// Clamped levels: min(abs(coeff), 67) for each coefficient
+    pub levels: [u8; 16],
+    /// Context values: min(abs(coeff), 2) for each coefficient
+    pub ctxs: [u8; 16],
+    /// Full absolute values (u16 to handle full range)
+    pub abs_levels: [u16; 16],
+}
+
+impl Default for PrecomputedCoeffs {
+    fn default() -> Self {
+        Self {
+            levels: [0; 16],
+            ctxs: [0; 16],
+            abs_levels: [0; 16],
+        }
+    }
+}
+
+/// Precompute coefficient data using SIMD (levels, contexts, abs_levels)
+/// This is the hot path optimization from libwebp's GetResidualCost_SSE2.
+#[cfg(feature = "simd")]
+#[multiversed::multiversed("x86-64-v4", "x86-64-v3", "x86-64-v2")]
+pub fn precompute_coeffs(coeffs: &[i32; 16]) -> PrecomputedCoeffs {
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        precompute_coeffs_scalar(coeffs)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        if let Some(token) = Sse41Token::summon() {
+            precompute_coeffs_sse2(token, coeffs)
+        } else {
+            precompute_coeffs_scalar(coeffs)
+        }
+    }
+}
+
+/// Scalar implementation of coefficient precomputation
+#[inline]
+#[allow(dead_code)]
+pub fn precompute_coeffs_scalar(coeffs: &[i32; 16]) -> PrecomputedCoeffs {
+    let mut result = PrecomputedCoeffs::default();
+    for i in 0..16 {
+        let abs_val = coeffs[i].unsigned_abs() as u16;
+        result.abs_levels[i] = abs_val;
+        result.ctxs[i] = abs_val.min(2) as u8;
+        result.levels[i] = abs_val.min(MAX_VARIABLE_LEVEL as u16) as u8;
+    }
+    result
+}
+
+/// SSE2 implementation of coefficient precomputation
+/// Matches libwebp's GetResidualCost_SSE2 precomputation block
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
+#[arcane]
+#[allow(dead_code)]
+fn precompute_coeffs_sse2(_token: impl Has128BitSimd + Copy, coeffs: &[i32; 16]) -> PrecomputedCoeffs {
+    let zero = _mm_setzero_si128();
+    let cst_2 = _mm_set1_epi8(2);
+    let cst_67 = _mm_set1_epi8(MAX_VARIABLE_LEVEL as i8);
+
+    // Load coefficients as i32, convert to i16
+    // libwebp works with i16 coefficients directly, we need to convert from i32
+    let c0_32 = simd_mem::_mm_loadu_si128(<&[i32; 4]>::try_from(&coeffs[0..4]).unwrap());
+    let c1_32 = simd_mem::_mm_loadu_si128(<&[i32; 4]>::try_from(&coeffs[4..8]).unwrap());
+    let c2_32 = simd_mem::_mm_loadu_si128(<&[i32; 4]>::try_from(&coeffs[8..12]).unwrap());
+    let c3_32 = simd_mem::_mm_loadu_si128(<&[i32; 4]>::try_from(&coeffs[12..16]).unwrap());
+
+    // Pack i32 to i16 (saturating)
+    let c0 = _mm_packs_epi32(c0_32, c1_32); // coeffs[0..8] as i16
+    let c1 = _mm_packs_epi32(c2_32, c3_32); // coeffs[8..16] as i16
+
+    // Compute absolute values: abs(v) = max(v, -v)
+    let d0 = _mm_sub_epi16(zero, c0);
+    let d1 = _mm_sub_epi16(zero, c1);
+    let e0 = _mm_max_epi16(c0, d0); // abs(c0)
+    let e1 = _mm_max_epi16(c1, d1); // abs(c1)
+
+    // Pack to bytes for context and level computation
+    let f = _mm_packs_epi16(e0, e1);
+
+    // Context = min(abs_val, 2)
+    let g = _mm_min_epu8(f, cst_2);
+
+    // Clamped level = min(abs_val, 67)
+    let h = _mm_min_epu8(f, cst_67);
+
+    let mut result = PrecomputedCoeffs::default();
+
+    // Store contexts and levels
+    simd_mem::_mm_storeu_si128(&mut result.ctxs, g);
+    simd_mem::_mm_storeu_si128(&mut result.levels, h);
+
+    // Store absolute values as u16
+    simd_mem::_mm_storeu_si128(
+        <&mut [u16; 8]>::try_from(&mut result.abs_levels[0..8]).unwrap(),
+        e0,
+    );
+    simd_mem::_mm_storeu_si128(
+        <&mut [u16; 8]>::try_from(&mut result.abs_levels[8..16]).unwrap(),
+        e1,
+    );
+
+    result
+}
+
+/// Find the last non-zero coefficient using SIMD
+/// Returns -1 if all coefficients are zero
+#[cfg(feature = "simd")]
+#[multiversed::multiversed("x86-64-v4", "x86-64-v3", "x86-64-v2")]
+pub fn find_last_nonzero(coeffs: &[i32; 16], first: usize) -> i32 {
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        find_last_nonzero_scalar(coeffs, first)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        if let Some(token) = Sse41Token::summon() {
+            find_last_nonzero_sse2(token, coeffs, first)
+        } else {
+            find_last_nonzero_scalar(coeffs, first)
+        }
+    }
+}
+
+/// Scalar implementation of find_last_nonzero
+#[inline]
+#[allow(dead_code)]
+pub fn find_last_nonzero_scalar(coeffs: &[i32; 16], first: usize) -> i32 {
+    for i in (first..16).rev() {
+        if coeffs[i] != 0 {
+            return i as i32;
+        }
+    }
+    -1
+}
+
+/// SSE2 implementation of find_last_nonzero
+/// Uses SIMD comparison and bitmask to find last non-zero
+#[cfg(all(target_arch = "x86_64", feature = "simd"))]
+#[arcane]
+#[allow(dead_code)]
+fn find_last_nonzero_sse2(_token: impl Has128BitSimd + Copy, coeffs: &[i32; 16], first: usize) -> i32 {
+    let zero = _mm_setzero_si128();
+
+    // Load and pack coefficients to bytes for comparison
+    let c0_32 = simd_mem::_mm_loadu_si128(<&[i32; 4]>::try_from(&coeffs[0..4]).unwrap());
+    let c1_32 = simd_mem::_mm_loadu_si128(<&[i32; 4]>::try_from(&coeffs[4..8]).unwrap());
+    let c2_32 = simd_mem::_mm_loadu_si128(<&[i32; 4]>::try_from(&coeffs[8..12]).unwrap());
+    let c3_32 = simd_mem::_mm_loadu_si128(<&[i32; 4]>::try_from(&coeffs[12..16]).unwrap());
+
+    let c0 = _mm_packs_epi32(c0_32, c1_32);
+    let c1 = _mm_packs_epi32(c2_32, c3_32);
+    let m0 = _mm_packs_epi16(c0, c1);
+
+    // Compare with zero
+    let m1 = _mm_cmpeq_epi8(m0, zero);
+
+    // Get bitmask: bit is 1 if byte is zero, 0 if non-zero
+    let mask = _mm_movemask_epi8(m1) as u32;
+
+    // Invert to get positions of non-zero bytes
+    let nonzero_mask = 0x0000ffff ^ mask;
+
+    // Create mask for positions >= first
+    let first_mask = !((1u32 << first) - 1) & 0xffff;
+    let valid_mask = nonzero_mask & first_mask;
+
+    if valid_mask == 0 {
+        -1
+    } else {
+        // Find highest set bit
+        (31 - valid_mask.leading_zeros()) as i32
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -768,6 +958,110 @@ mod tests {
                 "Mismatch at stride {}: scalar={}, simd={}",
                 stride, scalar, simd
             );
+        }
+    }
+
+    #[test]
+    fn test_precompute_coeffs_scalar() {
+        let coeffs: [i32; 16] = [0, -1, 2, -3, 4, -5, 100, -200, 0, 0, 67, 68, 1, 2, 0, 0];
+        let result = precompute_coeffs_scalar(&coeffs);
+
+        // Check abs_levels
+        assert_eq!(result.abs_levels[0], 0);
+        assert_eq!(result.abs_levels[1], 1);
+        assert_eq!(result.abs_levels[6], 100);
+        assert_eq!(result.abs_levels[7], 200);
+
+        // Check contexts (min(abs, 2))
+        assert_eq!(result.ctxs[0], 0);
+        assert_eq!(result.ctxs[1], 1);
+        assert_eq!(result.ctxs[2], 2);
+        assert_eq!(result.ctxs[6], 2); // 100 clamped to 2
+
+        // Check levels (min(abs, 67))
+        assert_eq!(result.levels[6], 67); // 100 clamped to 67
+        assert_eq!(result.levels[7], 67); // 200 clamped to 67
+        assert_eq!(result.levels[10], 67); // exactly 67
+        assert_eq!(result.levels[11], 67); // 68 clamped to 67
+    }
+
+    #[test]
+    #[cfg(feature = "simd")]
+    fn test_precompute_coeffs_simd_matches_scalar() {
+        let coeffs: [i32; 16] = [
+            0, -1, 2, -3, 4, -5, 100, -200, 0, 0, 67, 68, 1, 2, -50, 30,
+        ];
+
+        let scalar = precompute_coeffs_scalar(&coeffs);
+        let simd = precompute_coeffs(&coeffs);
+
+        for i in 0..16 {
+            assert_eq!(
+                scalar.abs_levels[i], simd.abs_levels[i],
+                "abs_levels mismatch at {}: scalar={}, simd={}",
+                i, scalar.abs_levels[i], simd.abs_levels[i]
+            );
+            assert_eq!(
+                scalar.ctxs[i], simd.ctxs[i],
+                "ctxs mismatch at {}: scalar={}, simd={}",
+                i, scalar.ctxs[i], simd.ctxs[i]
+            );
+            assert_eq!(
+                scalar.levels[i], simd.levels[i],
+                "levels mismatch at {}: scalar={}, simd={}",
+                i, scalar.levels[i], simd.levels[i]
+            );
+        }
+    }
+
+    #[test]
+    fn test_find_last_nonzero_scalar() {
+        // All zeros
+        let coeffs = [0i32; 16];
+        assert_eq!(find_last_nonzero_scalar(&coeffs, 0), -1);
+
+        // Single non-zero at end
+        let mut coeffs = [0i32; 16];
+        coeffs[15] = 1;
+        assert_eq!(find_last_nonzero_scalar(&coeffs, 0), 15);
+
+        // Multiple non-zeros
+        let mut coeffs = [0i32; 16];
+        coeffs[5] = 1;
+        coeffs[10] = -2;
+        assert_eq!(find_last_nonzero_scalar(&coeffs, 0), 10);
+
+        // With first offset
+        let mut coeffs = [0i32; 16];
+        coeffs[0] = 1;
+        coeffs[5] = 2;
+        assert_eq!(find_last_nonzero_scalar(&coeffs, 1), 5);
+        assert_eq!(find_last_nonzero_scalar(&coeffs, 6), -1);
+    }
+
+    #[test]
+    #[cfg(feature = "simd")]
+    fn test_find_last_nonzero_simd_matches_scalar() {
+        // Test various patterns
+        let test_cases: Vec<[i32; 16]> = vec![
+            [0; 16],
+            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            [1, 2, 3, 4, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [-1, 0, 2, 0, -3, 0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0],
+            [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+        ];
+
+        for (idx, coeffs) in test_cases.iter().enumerate() {
+            for first in 0..16 {
+                let scalar = find_last_nonzero_scalar(coeffs, first);
+                let simd = find_last_nonzero(coeffs, first);
+                assert_eq!(
+                    scalar, simd,
+                    "Mismatch for test case {} with first={}: scalar={}, simd={}",
+                    idx, first, scalar, simd
+                );
+            }
         }
     }
 }

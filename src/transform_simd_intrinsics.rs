@@ -256,6 +256,134 @@ fn dct4x4_two_sse2(_token: impl Has128BitSimd + Copy, block1: &mut [i32; 16], bl
     dct4x4_sse2(_token, block2);
 }
 
+// =============================================================================
+// Fused Residual + DCT (matches libwebp's FTransform2_SSE2)
+// =============================================================================
+
+/// Fused residual computation + DCT for two adjacent 4x4 blocks
+/// Takes u8 source and reference with stride, outputs i16 coefficients.
+/// Matches libwebp's FTransform2_SSE2 for maximum performance.
+///
+/// # Arguments
+/// * `src` - Source pixels (8 bytes per row = 2 blocks side by side)
+/// * `ref_` - Reference/prediction pixels (same layout)
+/// * `src_stride` - Stride for source rows
+/// * `ref_stride` - Stride for reference rows
+/// * `out` - Output: 32 i16 coefficients (2 blocks × 16 coeffs)
+#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+#[arcane]
+fn ftransform2_sse2(
+    _token: impl Has128BitSimd + Copy,
+    src: &[u8],
+    ref_: &[u8],
+    src_stride: usize,
+    ref_stride: usize,
+    out: &mut [i16; 32],
+) {
+    let zero = _mm_setzero_si128();
+
+    // Load 8 bytes per row from src (2 blocks × 4 bytes)
+    // We use unaligned loads since data may not be aligned
+    let src0 = _mm_loadl_epi64(src.as_ptr() as *const __m128i);
+    let src1 = _mm_loadl_epi64(src.as_ptr().add(src_stride) as *const __m128i);
+    let src2 = _mm_loadl_epi64(src.as_ptr().add(src_stride * 2) as *const __m128i);
+    let src3 = _mm_loadl_epi64(src.as_ptr().add(src_stride * 3) as *const __m128i);
+
+    // Load 8 bytes per row from ref
+    let ref0 = _mm_loadl_epi64(ref_.as_ptr() as *const __m128i);
+    let ref1 = _mm_loadl_epi64(ref_.as_ptr().add(ref_stride) as *const __m128i);
+    let ref2 = _mm_loadl_epi64(ref_.as_ptr().add(ref_stride * 2) as *const __m128i);
+    let ref3 = _mm_loadl_epi64(ref_.as_ptr().add(ref_stride * 3) as *const __m128i);
+
+    // Convert u8 to i16 (zero-extend)
+    let src_0 = _mm_unpacklo_epi8(src0, zero);
+    let src_1 = _mm_unpacklo_epi8(src1, zero);
+    let src_2 = _mm_unpacklo_epi8(src2, zero);
+    let src_3 = _mm_unpacklo_epi8(src3, zero);
+
+    let ref_0 = _mm_unpacklo_epi8(ref0, zero);
+    let ref_1 = _mm_unpacklo_epi8(ref1, zero);
+    let ref_2 = _mm_unpacklo_epi8(ref2, zero);
+    let ref_3 = _mm_unpacklo_epi8(ref3, zero);
+
+    // Compute difference (src - ref)
+    // Each diff register holds: [blk0_col0, blk0_col1, blk0_col2, blk0_col3, blk1_col0, ...]
+    let diff0 = _mm_sub_epi16(src_0, ref_0);
+    let diff1 = _mm_sub_epi16(src_1, ref_1);
+    let diff2 = _mm_sub_epi16(src_2, ref_2);
+    let diff3 = _mm_sub_epi16(src_3, ref_3);
+
+    // Reorganize for processing two blocks
+    // shuf01l/h splits low/high halves (block 0 and block 1)
+    let shuf01l = _mm_unpacklo_epi32(diff0, diff1);
+    let shuf23l = _mm_unpacklo_epi32(diff2, diff3);
+    let shuf01h = _mm_unpackhi_epi32(diff0, diff1);
+    let shuf23h = _mm_unpackhi_epi32(diff2, diff3);
+
+    // First pass for block 0
+    let (v01l, v32l) = ftransform_pass1_i16(_token, shuf01l, shuf23l);
+
+    // First pass for block 1
+    let (v01h, v32h) = ftransform_pass1_i16(_token, shuf01h, shuf23h);
+
+    // Second pass for both blocks
+    let mut out0 = [0i16; 16];
+    let mut out1 = [0i16; 16];
+    ftransform_pass2_i16(_token, &v01l, &v32l, &mut out0);
+    ftransform_pass2_i16(_token, &v01h, &v32h, &mut out1);
+
+    // Copy to output
+    out[..16].copy_from_slice(&out0);
+    out[16..].copy_from_slice(&out1);
+}
+
+/// Public dispatch function for fused residual + DCT of two adjacent blocks
+pub(crate) fn ftransform2_from_u8(
+    src: &[u8],
+    ref_: &[u8],
+    src_stride: usize,
+    ref_stride: usize,
+    out: &mut [i16; 32],
+) {
+    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+    {
+        if let Some(token) = Sse41Token::summon() {
+            ftransform2_sse2(token, src, ref_, src_stride, ref_stride, out);
+            return;
+        }
+    }
+    // Scalar fallback
+    ftransform2_scalar(src, ref_, src_stride, ref_stride, out);
+}
+
+/// Scalar fallback for fused residual + DCT
+fn ftransform2_scalar(
+    src: &[u8],
+    ref_: &[u8],
+    src_stride: usize,
+    ref_stride: usize,
+    out: &mut [i16; 32],
+) {
+    // Process two blocks
+    for block in 0..2 {
+        let mut block_data = [0i32; 16];
+        // Compute residual for this 4x4 block
+        for y in 0..4 {
+            for x in 0..4 {
+                let src_val = src[y * src_stride + block * 4 + x] as i32;
+                let ref_val = ref_[y * ref_stride + block * 4 + x] as i32;
+                block_data[y * 4 + x] = src_val - ref_val;
+            }
+        }
+        // Apply DCT
+        crate::transform::dct4x4_scalar(&mut block_data);
+        // Convert to i16
+        for (i, &val) in block_data.iter().enumerate() {
+            out[block * 16 + i] = val as i16;
+        }
+    }
+}
+
 /// Inverse DCT using SSE2 - matches libwebp ITransform_One_SSE2
 #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
 #[arcane]
@@ -486,6 +614,50 @@ mod tests {
 
         // Should get back original (or very close due to rounding)
         assert_eq!(original, block, "Roundtrip failed");
+    }
+
+    #[test]
+    fn test_ftransform2_from_u8() {
+        // Create test data: 2 adjacent 4x4 blocks (8 bytes per row)
+        // Each row is 8 bytes, 4 rows total
+        const STRIDE: usize = 16; // Use larger stride to test stride handling
+        let mut src = [128u8; STRIDE * 4];
+        let mut ref_ = [128u8; STRIDE * 4];
+
+        // Set up some test pattern in first 8 columns of each row
+        for y in 0..4 {
+            for x in 0..8 {
+                src[y * STRIDE + x] = (y * 8 + x) as u8 + 100;
+                ref_[y * STRIDE + x] = 128;
+            }
+        }
+
+        // Use ftransform2_from_u8
+        let mut out_simd = [0i16; 32];
+        ftransform2_from_u8(&src, &ref_, STRIDE, STRIDE, &mut out_simd);
+
+        // Compute expected result using scalar path
+        let mut expected = [0i16; 32];
+        for block in 0..2 {
+            let mut block_data = [0i32; 16];
+            for y in 0..4 {
+                for x in 0..4 {
+                    let src_val = src[y * STRIDE + block * 4 + x] as i32;
+                    let ref_val = ref_[y * STRIDE + block * 4 + x] as i32;
+                    block_data[y * 4 + x] = src_val - ref_val;
+                }
+            }
+            crate::transform::dct4x4_scalar(&mut block_data);
+            for (i, &val) in block_data.iter().enumerate() {
+                expected[block * 16 + i] = val as i16;
+            }
+        }
+
+        assert_eq!(
+            out_simd, expected,
+            "ftransform2_from_u8 mismatch.\nSIMD: {:?}\nExpected: {:?}",
+            out_simd, expected
+        );
     }
 }
 

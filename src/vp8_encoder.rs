@@ -2536,7 +2536,68 @@ impl<W: Write> Vp8Encoder<W> {
     }
 
     // gets the luma blocks with the DCT applied to them
+    #[cfg(not(feature = "simd"))]
     fn get_luma_blocks_from_predicted_16x16(
+        &self,
+        predicted_y_block: &[u8; LUMA_BLOCK_SIZE],
+        mbx: usize,
+        mby: usize,
+    ) -> [i32; 16 * 16] {
+        self.get_luma_blocks_from_predicted_16x16_scalar(predicted_y_block, mbx, mby)
+    }
+
+    // SIMD version: uses fused residual+DCT for pairs of blocks
+    #[cfg(feature = "simd")]
+    fn get_luma_blocks_from_predicted_16x16(
+        &self,
+        predicted_y_block: &[u8; LUMA_BLOCK_SIZE],
+        mbx: usize,
+        mby: usize,
+    ) -> [i32; 16 * 16] {
+        let pred_stride = LUMA_STRIDE;
+        let src_stride = usize::from(self.macroblock_width * 16);
+        let mut luma_blocks = [0i32; 16 * 16];
+
+        // Process pairs of horizontally adjacent blocks using fused residual+DCT
+        for block_y in 0..4 {
+            for block_x_pair in 0..2 {
+                let block_x = block_x_pair * 2;
+
+                // Starting position for this pair of blocks
+                let pred_start = (block_y * 4 + 1) * pred_stride + block_x * 4 + 1;
+                let src_row = mby * 16 + block_y * 4;
+                let src_col = mbx * 16 + block_x * 4;
+                let src_start = src_row * src_stride + src_col;
+
+                // ftransform2 outputs i16, convert to i32
+                let mut out16 = [0i16; 32];
+                crate::transform_simd_intrinsics::ftransform2_from_u8(
+                    &self.frame.ybuf[src_start..],
+                    &predicted_y_block[pred_start..],
+                    src_stride,
+                    pred_stride,
+                    &mut out16,
+                );
+
+                // Copy to output with i16 -> i32 conversion
+                let block_idx0 = block_y * 4 + block_x;
+                let block_idx1 = block_y * 4 + block_x + 1;
+                let out_base0 = block_idx0 * 16;
+                let out_base1 = block_idx1 * 16;
+
+                for i in 0..16 {
+                    luma_blocks[out_base0 + i] = out16[i] as i32;
+                    luma_blocks[out_base1 + i] = out16[16 + i] as i32;
+                }
+            }
+        }
+
+        luma_blocks
+    }
+
+    // Scalar fallback
+    #[allow(dead_code)]
+    fn get_luma_blocks_from_predicted_16x16_scalar(
         &self,
         predicted_y_block: &[u8; LUMA_BLOCK_SIZE],
         mbx: usize,

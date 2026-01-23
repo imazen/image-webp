@@ -17,6 +17,7 @@ See global ~/.claude/CLAUDE.md for general instructions.
 *Benchmark: 768x512 Kodak image at Q75, 10 iterations, release mode*
 
 ### Recent SIMD Optimizations
+- **FTransform2** - Fused residual+DCT for 2 blocks at once (2026-01-23)
 - DCT/IDCT: SIMD i32/i16 conversion (13% speedup)
 - t_transform: SIMD Hadamard for spectral distortion
 - SSE4x4: SIMD distortion calculation
@@ -34,6 +35,46 @@ See global ~/.claude/CLAUDE.md for general instructions.
 ### Quality vs libwebp
 - File sizes: 1.17-1.41x of libwebp (down from 2.5x before I4)
 - PSNR gap: ~1.35 dB behind at equal BPP
+
+### Detailed Encoder Callgrind Analysis (2026-01-23)
+
+**Instruction counts (768x512 Kodak, Q75, method 4):**
+| Encoder | Instructions | Ratio |
+|---------|--------------|-------|
+| Ours | 2,350M | 2.88x more |
+| libwebp | 817M | baseline |
+
+**Cache behavior (D1 miss rate):**
+- Ours: 0.1% (better than libwebp)
+- libwebp: 0.3%
+
+The 2.8x slowdown is pure instruction count, not memory access patterns.
+
+**Hotspot comparison (millions of instructions):**
+| Our Function | Ours | libwebp Equivalent | libwebp | Ratio |
+|--------------|------|-------------------|---------|-------|
+| choose_macroblock_info | 1,468M (62%) | VP8Decimate + PickBest* | 580M | 2.5x |
+| get_residual_cost | 349M (15%) | GetResidualCost_SSE2 | 135M | 2.6x |
+| encode_coefficients | 304M (13%) | VP8EmitTokens | 57M | 5.3x |
+| trellis_quantize_block | 304M (13%) | QuantizeBlock_SSE2 | 39M | **7.8x** |
+| get_cost_luma16 | 182M (8%) | VP8GetCostLuma16 | 47M | 3.9x |
+| get_cost_luma4 | 181M (8%) | VP8GetCostLuma4 | 115M | 1.6x |
+| tdisto_16x16 | 154M (7%) | Disto4x4_SSE2 | 52M | 3.0x |
+| idct4x4 | 138M (6%) | ITransform_SSE2 | 64M | 2.2x |
+| dct4x4 | 119M (5%) | FTransform_SSE2 | 41M | 2.9x |
+| write_with_tree | 121M (5%) | VP8PutBit | 44M | 2.8x |
+
+**Biggest optimization opportunities (potential instruction savings):**
+1. **trellis_quantize_block** - 7.8x slower, ~265M potential savings
+2. **encode_coefficients** - 5.3x slower, ~247M potential savings
+3. **get_residual_cost** - 2.6x slower, ~214M potential savings (libwebp uses SIMD)
+4. **get_cost_luma16** - 3.9x slower, ~135M potential savings
+
+**libwebp SIMD functions we lack:**
+- `GetResidualCost_SSE2` - residual cost with SIMD
+- `QuantizeBlock_SSE2` - quantization with SIMD
+- `Disto4x4_SSE2` - distortion with SIMD
+- `FTransform_SSE2` / `ITransform_SSE2` - faster than our SIMD
 
 ### Key Files
 - `src/vp8_encoder.rs` - Main encoder, mode selection
@@ -143,8 +184,12 @@ Completed:
 - [x] ~~Row cache with extra rows for loop filter cache locality~~ (commit c16995f)
 - [x] ~~Add SIMD horizontal normal filter~~ (commit fc4c33f)
 - [x] ~~Inline coefficient tree like GetCoeffsFast~~ (commit ac47ba5)
-- [ ] Consider SIMD for choose_macroblock_info inner loops (encoder)
-- [ ] Profile get_residual_cost for optimization opportunities
+**Encoder optimization opportunities (see Callgrind Analysis above):**
+- [ ] trellis_quantize_block - 7.8x slower, SIMD quantization like QuantizeBlock_SSE2
+- [ ] encode_coefficients - 5.3x slower, token emission overhead
+- [ ] get_residual_cost - 2.6x slower, SIMD residual cost like GetResidualCost_SSE2
+- [ ] get_cost_luma16 - 3.9x slower
+- [ ] tdisto_16x16 - 3.0x slower (despite having some SIMD)
 
 ## Known Bugs
 

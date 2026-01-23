@@ -1928,7 +1928,6 @@ pub fn get_residual_cost(
     let mut n = res.first;
 
     // Get probability p0 for the first coefficient
-    // Note: for n=0 or n=1, band = n (VP8_ENC_BANDS[0]=0, VP8_ENC_BANDS[1]=1)
     let band = VP8_ENC_BANDS[n] as usize;
     let p0 = probs[ctype][band][ctx0][0];
 
@@ -1936,7 +1935,6 @@ pub fn get_residual_cost(
     let mut ctx = ctx0;
 
     // bit_cost(1, p0) is already incorporated in the cost tables, but only if ctx != 0.
-    // For ctx0 == 0, we need to add it explicitly.
     let mut cost = if ctx0 == 0 {
         vp8_bit_cost(true, p0) as u32
     } else {
@@ -1949,7 +1947,6 @@ pub fn get_residual_cost(
     }
 
     // Process coefficients from first to last-1
-    // Context updates: ctx for position n+1 depends on coefficient value at position n
     while (n as i32) < res.last {
         let v = res.coeffs[n].unsigned_abs() as usize;
 
