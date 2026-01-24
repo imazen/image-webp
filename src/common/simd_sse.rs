@@ -8,7 +8,7 @@
 #![allow(clippy::needless_range_loop)]
 
 #[cfg(all(target_arch = "x86_64", feature = "simd"))]
-use archmage::{arcane, Has128BitSimd, SimdToken, Sse41Token};
+use archmage::{arcane, Has128BitSimd, SimdToken, X64V3Token};
 #[cfg(all(target_arch = "x86_64", feature = "simd"))]
 use core::arch::x86_64::*;
 #[cfg(all(target_arch = "x86_64", feature = "simd"))]
@@ -29,7 +29,7 @@ pub fn sse4x4(a: &[u8; 16], b: &[u8; 16]) -> u32 {
     #[cfg(target_arch = "x86_64")]
     {
         // SSE4.1 implies SSE2; summon() is now fast (no env var check)
-        if let Some(token) = Sse41Token::summon() {
+        if let Some(token) = X64V3Token::summon() {
             sse4x4_sse2(token, a, b)
         } else {
             sse4x4_scalar(a, b)
@@ -99,7 +99,7 @@ pub fn sse4x4_with_residual(src: &[u8; 16], pred: &[u8; 16], residual: &[i32; 16
 
     #[cfg(target_arch = "x86_64")]
     {
-        if let Some(token) = Sse41Token::summon() {
+        if let Some(token) = X64V3Token::summon() {
             sse4x4_with_residual_sse2(token, src, pred, residual)
         } else {
             sse4x4_with_residual_scalar(src, pred, residual)
@@ -201,7 +201,7 @@ pub fn sse_16x16_luma(
 
     #[cfg(target_arch = "x86_64")]
     {
-        if let Some(token) = Sse41Token::summon() {
+        if let Some(token) = X64V3Token::summon() {
             sse_16x16_luma_sse2(token, src_y, src_width, mbx, mby, pred)
         } else {
             sse_16x16_luma_scalar(src_y, src_width, mbx, mby, pred)
@@ -302,7 +302,7 @@ pub fn sse_8x8_chroma(
 
     #[cfg(target_arch = "x86_64")]
     {
-        if let Some(token) = Sse41Token::summon() {
+        if let Some(token) = X64V3Token::summon() {
             sse_8x8_chroma_sse2(token, src_uv, src_width, mbx, mby, pred)
         } else {
             sse_8x8_chroma_scalar(src_uv, src_width, mbx, mby, pred)
@@ -437,7 +437,7 @@ pub fn t_transform(input: &[u8], stride: usize, w: &[u16; 16]) -> i32 {
 
     #[cfg(target_arch = "x86_64")]
     {
-        if let Some(token) = Sse41Token::summon() {
+        if let Some(token) = X64V3Token::summon() {
             t_transform_sse2(token, input, stride, w)
         } else {
             t_transform_scalar(input, stride, w)
@@ -569,7 +569,7 @@ pub fn precompute_coeffs(coeffs: &[i32; 16]) -> PrecomputedCoeffs {
 
     #[cfg(target_arch = "x86_64")]
     {
-        if let Some(token) = Sse41Token::summon() {
+        if let Some(token) = X64V3Token::summon() {
             precompute_coeffs_sse2(token, coeffs)
         } else {
             precompute_coeffs_scalar(coeffs)
@@ -661,7 +661,7 @@ pub fn find_last_nonzero(coeffs: &[i32; 16], first: usize) -> i32 {
 
     #[cfg(target_arch = "x86_64")]
     {
-        if let Some(token) = Sse41Token::summon() {
+        if let Some(token) = X64V3Token::summon() {
             find_last_nonzero_sse2(token, coeffs, first)
         } else {
             find_last_nonzero_scalar(coeffs, first)

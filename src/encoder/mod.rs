@@ -11,4 +11,6 @@ mod vec_writer;
 pub mod vp8;
 
 // Re-export public API
-pub use api::{ColorType, Encoder, EncoderConfig, EncoderParams, EncodingError, Preset, WebPEncoder};
+pub use api::{
+    ColorType, Encoder, EncoderConfig, EncoderParams, EncodingError, Preset, WebPEncoder,
+};

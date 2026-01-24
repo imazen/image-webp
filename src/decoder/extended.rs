@@ -1,9 +1,9 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::lossless::LosslessDecoder;
 use super::alpha_blending::do_alpha_blending;
 use super::api::DecodingError;
+use super::lossless::LosslessDecoder;
 use crate::slice_reader::SliceReader;
 
 #[derive(Debug, Clone)]

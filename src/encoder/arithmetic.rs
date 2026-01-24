@@ -197,8 +197,8 @@ impl ArithmeticEncoder {
 
 #[cfg(test)]
 mod tests {
-    use crate::decoder::arithmetic::ArithmeticDecoder;
     use crate::common::types::*;
+    use crate::decoder::arithmetic::ArithmeticDecoder;
 
     use super::*;
 

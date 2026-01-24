@@ -13,7 +13,7 @@
 #![allow(clippy::identity_op)]
 
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-use archmage::{arcane, Sse41Token};
+use archmage::{arcane, X64V3Token};
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::*;
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -26,7 +26,7 @@ use safe_unaligned_simd::x86_64 as simd_mem;
 #[arcane]
 #[inline(always)]
 fn needs_filter_16(
-    _token: Sse41Token,
+    _token: X64V3Token,
     p1: __m128i,
     p0: __m128i,
     q0: __m128i,
@@ -61,7 +61,7 @@ fn needs_filter_16(
 #[arcane]
 #[inline(always)]
 fn get_base_delta_16(
-    _token: Sse41Token,
+    _token: X64V3Token,
     p1: __m128i,
     p0: __m128i,
     q0: __m128i,
@@ -90,7 +90,7 @@ fn get_base_delta_16(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 #[inline(always)]
-fn signed_shift_right_3(_token: Sse41Token, v: __m128i) -> __m128i {
+fn signed_shift_right_3(_token: X64V3Token, v: __m128i) -> __m128i {
     // For signed bytes, we need to handle sign extension properly.
     // Unpack to 16-bit, shift, pack back.
     let lo = _mm_srai_epi16(_mm_unpacklo_epi8(v, v), 11); // sign-extend and shift
@@ -102,7 +102,7 @@ fn signed_shift_right_3(_token: Sse41Token, v: __m128i) -> __m128i {
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 #[inline(always)]
-fn do_simple_filter_16(_token: Sse41Token, p0: &mut __m128i, q0: &mut __m128i, fl: __m128i) {
+fn do_simple_filter_16(_token: X64V3Token, p0: &mut __m128i, q0: &mut __m128i, fl: __m128i) {
     let sign = _mm_set1_epi8(-128i8);
     let k3 = _mm_set1_epi8(3);
     let k4 = _mm_set1_epi8(4);
@@ -138,7 +138,7 @@ fn do_simple_filter_16(_token: Sse41Token, p0: &mut __m128i, q0: &mut __m128i, f
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 pub fn simple_v_filter16(
-    _token: Sse41Token,
+    _token: X64V3Token,
     pixels: &mut [u8],
     point: usize,
     stride: usize,
@@ -181,7 +181,7 @@ pub fn simple_v_filter16(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 #[inline(always)]
-fn transpose_8x16_to_16x8(_token: Sse41Token, rows: &[__m128i; 16]) -> [__m128i; 8] {
+fn transpose_8x16_to_16x8(_token: X64V3Token, rows: &[__m128i; 16]) -> [__m128i; 8] {
     // Stage 1: interleave pairs
     let t0 = _mm_unpacklo_epi8(rows[0], rows[1]);
     let t1 = _mm_unpacklo_epi8(rows[2], rows[3]);
@@ -231,7 +231,7 @@ fn transpose_8x16_to_16x8(_token: Sse41Token, rows: &[__m128i; 16]) -> [__m128i;
 #[arcane]
 #[inline(always)]
 fn transpose_4x16_to_16x4(
-    _token: Sse41Token,
+    _token: X64V3Token,
     p1: __m128i,
     p0: __m128i,
     q0: __m128i,
@@ -280,7 +280,7 @@ fn transpose_4x16_to_16x4(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 pub fn simple_h_filter16(
-    _token: Sse41Token,
+    _token: X64V3Token,
     pixels: &mut [u8],
     x: usize,
     y_start: usize,
@@ -331,7 +331,7 @@ pub fn simple_h_filter16(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 pub fn simple_filter_mb_edge_v(
-    _token: Sse41Token,
+    _token: X64V3Token,
     pixels: &mut [u8],
     mb_y: usize,
     mb_x: usize,
@@ -347,7 +347,7 @@ pub fn simple_filter_mb_edge_v(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 pub fn simple_filter_mb_edge_h(
-    _token: Sse41Token,
+    _token: X64V3Token,
     pixels: &mut [u8],
     mb_y: usize,
     mb_x: usize,
@@ -364,7 +364,7 @@ pub fn simple_filter_mb_edge_h(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 pub fn simple_filter_subblock_edge_v(
-    _token: Sse41Token,
+    _token: X64V3Token,
     pixels: &mut [u8],
     mb_y: usize,
     mb_x: usize,
@@ -381,7 +381,7 @@ pub fn simple_filter_subblock_edge_v(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 pub fn simple_filter_subblock_edge_h(
-    _token: Sse41Token,
+    _token: X64V3Token,
     pixels: &mut [u8],
     mb_y: usize,
     mb_x: usize,
@@ -405,7 +405,7 @@ pub fn simple_filter_subblock_edge_h(
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn needs_filter_normal_16(
-    _token: Sse41Token,
+    _token: X64V3Token,
     p3: __m128i,
     p2: __m128i,
     p1: __m128i,
@@ -459,7 +459,7 @@ fn needs_filter_normal_16(
 #[arcane]
 #[inline(always)]
 fn high_edge_variance_16(
-    _token: Sse41Token,
+    _token: X64V3Token,
     p1: __m128i,
     p0: __m128i,
     q0: __m128i,
@@ -499,7 +499,7 @@ fn high_edge_variance_16(
 #[arcane]
 #[inline(always)]
 fn do_filter4_16(
-    _token: Sse41Token,
+    _token: X64V3Token,
     p1: &mut __m128i,
     p0: &mut __m128i,
     q0: &mut __m128i,
@@ -567,7 +567,7 @@ fn do_filter4_16(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 #[inline(always)]
-fn signed_shift_right_1(_token: Sse41Token, v: __m128i) -> __m128i {
+fn signed_shift_right_1(_token: X64V3Token, v: __m128i) -> __m128i {
     let lo = _mm_srai_epi16(_mm_unpacklo_epi8(v, v), 9);
     let hi = _mm_srai_epi16(_mm_unpackhi_epi8(v, v), 9);
     _mm_packs_epi16(lo, hi)
@@ -581,7 +581,7 @@ fn signed_shift_right_1(_token: Sse41Token, v: __m128i) -> __m128i {
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn do_filter6_16(
-    _token: Sse41Token,
+    _token: X64V3Token,
     p2: &mut __m128i,
     p1: &mut __m128i,
     p0: &mut __m128i,
@@ -684,7 +684,7 @@ fn do_filter6_16(
 #[arcane]
 #[inline(always)]
 fn filter6_wide_half(
-    _token: Sse41Token,
+    _token: X64V3Token,
     p2: __m128i,
     p1: __m128i,
     p0: __m128i,
@@ -744,7 +744,7 @@ fn filter6_wide_half(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 pub fn normal_v_filter16_inner(
-    _token: Sse41Token,
+    _token: X64V3Token,
     pixels: &mut [u8],
     point: usize,
     stride: usize,
@@ -818,7 +818,7 @@ pub fn normal_v_filter16_inner(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 pub fn normal_v_filter16_edge(
-    _token: Sse41Token,
+    _token: X64V3Token,
     pixels: &mut [u8],
     point: usize,
     stride: usize,
@@ -904,7 +904,7 @@ pub fn normal_v_filter16_edge(
 #[arcane]
 #[inline(always)]
 fn transpose_6x16_to_16x6(
-    _token: Sse41Token,
+    _token: X64V3Token,
     p2: __m128i,
     p1: __m128i,
     p0: __m128i,
@@ -981,7 +981,7 @@ fn transpose_6x16_to_16x6(
 #[allow(clippy::too_many_arguments)]
 #[arcane]
 pub fn normal_h_filter16_inner(
-    _token: Sse41Token,
+    _token: X64V3Token,
     pixels: &mut [u8],
     x: usize,
     y_start: usize,
@@ -1054,7 +1054,7 @@ pub fn normal_h_filter16_inner(
 #[allow(clippy::too_many_arguments)]
 #[arcane]
 pub fn normal_h_filter16_edge(
-    _token: Sse41Token,
+    _token: X64V3Token,
     pixels: &mut [u8],
     x: usize,
     y_start: usize,
@@ -1135,7 +1135,7 @@ pub fn normal_h_filter16_edge(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 pub fn normal_h_filter_uv_edge(
-    _token: Sse41Token,
+    _token: X64V3Token,
     u_pixels: &mut [u8],
     v_pixels: &mut [u8],
     x: usize,
@@ -1224,7 +1224,7 @@ pub fn normal_h_filter_uv_edge(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 pub fn normal_h_filter_uv_inner(
-    _token: Sse41Token,
+    _token: X64V3Token,
     u_pixels: &mut [u8],
     v_pixels: &mut [u8],
     x: usize,
@@ -1311,7 +1311,7 @@ pub fn normal_h_filter_uv_inner(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 pub fn normal_v_filter_uv_edge(
-    _token: Sse41Token,
+    _token: X64V3Token,
     u_pixels: &mut [u8],
     v_pixels: &mut [u8],
     point: usize,
@@ -1386,7 +1386,7 @@ pub fn normal_v_filter_uv_edge(
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[arcane]
 pub fn normal_v_filter_uv_inner(
-    _token: Sse41Token,
+    _token: X64V3Token,
     u_pixels: &mut [u8],
     v_pixels: &mut [u8],
     point: usize,
@@ -1486,7 +1486,7 @@ mod tests {
     #[test]
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     fn test_simple_v_filter16_matches_scalar() {
-        let Some(token) = archmage::Sse41Token::summon() else {
+        let Some(token) = archmage::X64V3Token::summon() else {
             return;
         };
 
@@ -1544,7 +1544,7 @@ mod tests {
     #[test]
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     fn test_simple_h_filter16_matches_scalar() {
-        let Some(token) = archmage::Sse41Token::summon() else {
+        let Some(token) = archmage::X64V3Token::summon() else {
             return;
         };
 
@@ -1601,7 +1601,7 @@ mod tests {
     #[test]
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     fn test_normal_v_filter16_inner_matches_scalar() {
-        let Some(token) = archmage::Sse41Token::summon() else {
+        let Some(token) = archmage::X64V3Token::summon() else {
             return;
         };
 
@@ -1689,7 +1689,7 @@ mod tests {
     #[test]
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     fn test_normal_v_filter16_edge_matches_scalar() {
-        let Some(token) = archmage::Sse41Token::summon() else {
+        let Some(token) = archmage::X64V3Token::summon() else {
             return;
         };
 

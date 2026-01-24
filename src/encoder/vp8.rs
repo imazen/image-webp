@@ -4,18 +4,20 @@ use core::mem;
 
 use super::vec_writer::VecWriter;
 
-use crate::common::transform;
 use super::arithmetic::ArithmeticEncoder;
-use crate::common::types::Frame;
-use crate::common::types::*;
 use super::cost::{
     analyze_image, assign_segments_kmeans, compute_segment_quant, estimate_dc16_cost,
     estimate_residual_cost, get_cost_luma4, record_coeffs, trellis_quantize_block, LevelCosts,
     ProbaStats, TokenType, FIXED_COSTS_I16, FIXED_COSTS_UV,
 };
+use crate::common::transform;
+use crate::common::types::Frame;
+use crate::common::types::*;
 // Intra4 imports for coefficient-level cost estimation (used in pick_best_intra4)
 use super::cost::get_i4_mode_cost;
 // Full RD imports for spectral distortion and flat source detection
+use super::api::ColorType;
+use super::api::EncodingError;
 use super::cost::{
     get_cost_luma16, get_cost_uv, is_flat_coeffs, is_flat_source_16, tdisto_16x16,
     FLATNESS_LIMIT_I16, FLATNESS_LIMIT_UV, FLATNESS_PENALTY, RD_DISTO_MULT, VP8_WEIGHT_Y,
@@ -23,8 +25,6 @@ use super::cost::{
 use crate::common::prediction::*;
 use crate::decoder::yuv::convert_image_y;
 use crate::decoder::yuv::convert_image_yuv;
-use super::api::ColorType;
-use super::api::EncodingError;
 
 //------------------------------------------------------------------------------
 // Quality to quantization index mapping
@@ -1953,7 +1953,11 @@ impl<'a> Vp8Encoder<'a> {
 
                     // Compute SSE between source and reconstructed using SIMD
                     #[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "x86")))]
-                    let sse = crate::common::simd_sse::sse4x4_with_residual(&src_block, pred, &dequantized);
+                    let sse = crate::common::simd_sse::sse4x4_with_residual(
+                        &src_block,
+                        pred,
+                        &dequantized,
+                    );
                     #[cfg(not(all(
                         feature = "simd",
                         any(target_arch = "x86_64", target_arch = "x86")
@@ -2412,7 +2416,8 @@ impl<'a> Vp8Encoder<'a> {
         // Use sharpness=0 (no sharpening reduction) and default filter_strength=50
         let sharpness: u8 = 0;
         let filter_strength: u8 = 50;
-        let filter_level = super::cost::compute_filter_level(quant_index, sharpness, filter_strength);
+        let filter_level =
+            super::cost::compute_filter_level(quant_index, sharpness, filter_strength);
 
         self.frame = Frame {
             width,

@@ -21,16 +21,15 @@ use core::array;
 use core::default::Default;
 
 use super::api::{DecodingError, UpsamplingMethod};
-use crate::slice_reader::SliceReader;
-use crate::common::types::*;
-use crate::common::prediction::*;
 use super::yuv;
+use crate::common::prediction::*;
+use crate::common::types::*;
+use crate::slice_reader::SliceReader;
 
 use super::bit_reader::{VP8HeaderBitReader, VP8Partitions};
-use crate::common::transform;
 use super::loop_filter_dispatch;
+use crate::common::transform;
 use loop_filter_dispatch::*;
-
 
 #[derive(Clone, Copy)]
 pub(crate) struct TreeNode {

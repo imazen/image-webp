@@ -3,6 +3,8 @@
 //! These functions dispatch to SIMD implementations when available,
 //! falling back to scalar implementations.
 
+#![allow(clippy::too_many_arguments)]
+
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 use archmage::SimdToken;
 
@@ -19,7 +21,7 @@ pub(crate) fn simple_filter_horizontal_16_rows(
     edge_limit: u8,
 ) {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if let Some(token) = archmage::Sse41Token::try_new() {
+    if let Some(token) = archmage::X64V3Token::try_new() {
         // Use the new 16-pixel-at-once approach with transpose
         super::loop_filter_avx2::simple_h_filter16(
             token,
@@ -50,7 +52,7 @@ pub(crate) fn simple_filter_vertical_16_cols(
     edge_limit: u8,
 ) {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if let Some(token) = archmage::Sse41Token::try_new() {
+    if let Some(token) = archmage::X64V3Token::try_new() {
         // Use the new 16-pixel-at-once approach
         let point = y0 * stride + x_start;
         super::loop_filter_avx2::simple_v_filter16(
@@ -83,7 +85,7 @@ pub(crate) fn normal_filter_vertical_mb_16_cols(
     edge_limit: u8,
 ) {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if let Some(token) = archmage::Sse41Token::try_new() {
+    if let Some(token) = archmage::X64V3Token::try_new() {
         let point = y0 * stride + x_start;
         super::loop_filter_avx2::normal_v_filter16_edge(
             token,
@@ -123,7 +125,7 @@ pub(crate) fn normal_filter_vertical_sub_16_cols(
     edge_limit: u8,
 ) {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if let Some(token) = archmage::Sse41Token::try_new() {
+    if let Some(token) = archmage::X64V3Token::try_new() {
         let point = y0 * stride + x_start;
         super::loop_filter_avx2::normal_v_filter16_inner(
             token,
@@ -164,7 +166,7 @@ pub(crate) fn normal_filter_horizontal_mb_16_rows(
     edge_limit: u8,
 ) {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if let Some(token) = archmage::Sse41Token::try_new() {
+    if let Some(token) = archmage::X64V3Token::try_new() {
         super::loop_filter_avx2::normal_h_filter16_edge(
             token,
             buf,
@@ -202,7 +204,7 @@ pub(crate) fn normal_filter_horizontal_sub_16_rows(
     edge_limit: u8,
 ) {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if let Some(token) = archmage::Sse41Token::try_new() {
+    if let Some(token) = archmage::X64V3Token::try_new() {
         super::loop_filter_avx2::normal_h_filter16_inner(
             token,
             buf,
@@ -242,7 +244,7 @@ pub(crate) fn normal_filter_horizontal_uv_mb(
     edge_limit: u8,
 ) {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if let Some(token) = archmage::Sse41Token::try_new() {
+    if let Some(token) = archmage::X64V3Token::try_new() {
         super::loop_filter_avx2::normal_h_filter_uv_edge(
             token,
             u_buf,
@@ -288,7 +290,7 @@ pub(crate) fn normal_filter_horizontal_uv_sub(
     edge_limit: u8,
 ) {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if let Some(token) = archmage::Sse41Token::try_new() {
+    if let Some(token) = archmage::X64V3Token::try_new() {
         super::loop_filter_avx2::normal_h_filter_uv_inner(
             token,
             u_buf,
@@ -335,7 +337,7 @@ pub(crate) fn normal_filter_vertical_uv_mb(
     edge_limit: u8,
 ) {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if let Some(token) = archmage::Sse41Token::try_new() {
+    if let Some(token) = archmage::X64V3Token::try_new() {
         let point = y0 * stride + x_start;
         super::loop_filter_avx2::normal_v_filter_uv_edge(
             token,
@@ -386,7 +388,7 @@ pub(crate) fn normal_filter_vertical_uv_sub(
     edge_limit: u8,
 ) {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if let Some(token) = archmage::Sse41Token::try_new() {
+    if let Some(token) = archmage::X64V3Token::try_new() {
         let point = y0 * stride + x_start;
         super::loop_filter_avx2::normal_v_filter_uv_inner(
             token,

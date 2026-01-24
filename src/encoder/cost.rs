@@ -237,7 +237,6 @@ pub fn quantdiv(coeff: u32, iq: u32, bias: u32) -> i32 {
     ((coeff as u64 * iq as u64 + bias as u64) >> QFIX) as i32
 }
 
-
 /// Cutoff for very small filter strengths (have close to no visual effect)
 const FSTRENGTH_CUTOFF: u8 = 2;
 
@@ -288,7 +287,6 @@ pub fn compute_filter_level(quant_index: u8, sharpness: u8, filter_strength: u8)
 
 //------------------------------------------------------------------------------
 // Mode costs
-
 
 //------------------------------------------------------------------------------
 // Lambda calculation

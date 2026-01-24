@@ -4,13 +4,13 @@
 //! Runtime detection selects best available: SSE2 / AVX2+FMA / AVX-512
 
 #[cfg(target_arch = "x86_64")]
-use std::arch::x86_64::*;
+use core::arch::x86_64::*;
 
 #[cfg(target_arch = "x86")]
-use std::arch::x86::*;
+use core::arch::x86::*;
 
 #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-use archmage::{arcane, Has128BitSimd, SimdToken, Sse41Token};
+use archmage::{arcane, Has128BitSimd, SimdToken, X64V3Token};
 #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
 use safe_unaligned_simd::x86_64 as simd_mem;
 
@@ -23,7 +23,7 @@ pub(crate) fn dct4x4_intrinsics(block: &mut [i32; 16]) {
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     {
         // SSE4.1 implies SSE2; summon() is now fast (no env var check)
-        if let Some(token) = Sse41Token::summon() {
+        if let Some(token) = X64V3Token::summon() {
             dct4x4_sse2(token, block);
         } else {
             crate::common::transform::dct4x4_scalar(block);
@@ -67,7 +67,7 @@ pub(crate) fn idct4x4_intrinsics(block: &mut [i32]) {
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     {
         // SSE4.1 implies SSE2; summon() is now fast (no env var check)
-        if let Some(token) = Sse41Token::summon() {
+        if let Some(token) = X64V3Token::summon() {
             idct4x4_sse2(token, block);
         } else {
             crate::common::transform::idct4x4_scalar(block);
@@ -108,7 +108,7 @@ pub(crate) fn dct4x4_two_intrinsics(block1: &mut [i32; 16], block2: &mut [i32; 1
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     {
         // SSE4.1 implies SSE2; summon() is now fast (no env var check)
-        if let Some(token) = Sse41Token::summon() {
+        if let Some(token) = X64V3Token::summon() {
             dct4x4_two_sse2(token, block1, block2);
         } else {
             crate::common::transform::dct4x4_scalar(block1);
@@ -438,7 +438,7 @@ pub(crate) fn ftransform2_from_u8(
 ) {
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     {
-        if let Some(token) = Sse41Token::summon() {
+        if let Some(token) = X64V3Token::summon() {
             ftransform2_sse2(token, src, ref_, src_stride, ref_stride, out);
             return;
         }

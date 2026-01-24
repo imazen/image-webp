@@ -4,7 +4,7 @@
 //! Processes 32 pixels at a time with SIMD RGB interleaving.
 
 #[cfg(target_arch = "x86_64")]
-use archmage::{arcane, Has128BitSimd, SimdToken, Sse41Token};
+use archmage::{arcane, Has128BitSimd, SimdToken, X64V3Token};
 
 #[cfg(target_arch = "x86_64")]
 use safe_unaligned_simd::x86_64 as simd_mem;
@@ -304,7 +304,7 @@ fn yuv_to_rgb_scalar(y: u8, u: u8, v: u8) -> (u8, u8, u8) {
 #[cfg(target_arch = "x86_64")]
 pub fn yuv420_to_rgb_row(y: &[u8], u: &[u8], v: &[u8], dst: &mut [u8]) {
     // SSE4.1 implies SSE2; summon() is now fast (no env var check)
-    let token = Sse41Token::summon().expect("SSE4.1 required for SIMD YUV");
+    let token = X64V3Token::summon().expect("SSE4.1 required for SIMD YUV");
     yuv420_to_rgb_row_inner(token, y, u, v, dst);
 }
 
@@ -356,7 +356,7 @@ fn yuv420_to_rgb_row_inner(
 #[allow(dead_code)]
 pub fn yuv420_to_rgba_row(y: &[u8], u: &[u8], v: &[u8], dst: &mut [u8]) {
     // SSE4.1 implies SSE2; summon() is now fast (no env var check)
-    let token = Sse41Token::summon().expect("SSE4.1 required for SIMD YUV");
+    let token = X64V3Token::summon().expect("SSE4.1 required for SIMD YUV");
     yuv420_to_rgba_row_inner(token, y, u, v, dst);
 }
 
@@ -552,7 +552,7 @@ pub fn fancy_upsample_8_pairs(
     rgb: &mut [u8],
 ) {
     // SSE4.1 implies SSE2; summon() is now fast (no env var check)
-    let token = Sse41Token::summon().expect("SSE4.1 required for SIMD YUV");
+    let token = X64V3Token::summon().expect("SSE4.1 required for SIMD YUV");
     fancy_upsample_8_pairs_inner(token, y_row, u_row_1, u_row_2, v_row_1, v_row_2, rgb);
 }
 

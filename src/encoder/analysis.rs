@@ -744,6 +744,7 @@ impl AnalysisIterator {
 
     /// Advance to next macroblock
     /// Returns true if more macroblocks remain
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> bool {
         self.x += 1;
         if self.x >= self.mb_w {
