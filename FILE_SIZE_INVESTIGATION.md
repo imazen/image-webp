@@ -140,6 +140,24 @@ Attempted to remove sign bit cost from `level_cost_fast` and `level_cost_with_ta
 | zenwebp (before fix) | 78KB | 1.068x |
 | zenwebp (after TokenType fix) | 76.5KB | 1.048x |
 
+## SSIMULACRA2 Quality Comparison (2026-01-24)
+
+**Quality sweep across Q10-Q100** (average of kodak 1-6):
+
+| Q Range | Size vs libwebp | SSIM2 Δ | Interpretation |
+|---------|-----------------|---------|----------------|
+| 10-70 | 100-105% | **+0.2 to +1.1** | zenwebp better quality |
+| **75** | 101% | **-0.18** | **Crossover point** |
+| 80-95 | 97-102% | **-0.3 to -0.9** | libwebp better quality |
+| 100 | 102% | -0.07 | Nearly equal |
+
+**Key insight**: Crossover at Q75
+- **Below Q75**: zenwebp achieves +0.3 to +1.0 better SSIM2 at similar file size
+- **Above Q75**: libwebp achieves +0.3 to +0.9 better SSIM2 at similar file size
+
+This suggests our lambda/RD tradeoff favors perceptual quality at lower bitrates
+but is less efficient at high quality settings.
+
 ## Code References
 
 ### Key Files
