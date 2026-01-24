@@ -802,35 +802,6 @@ mod benches {
     }
 
     #[bench]
-    fn bench_predict_4x4(b: &mut Bencher) {
-        let mut v = black_box(make_sample_image());
-
-        let res_data = vec![1i32; W * H * 4];
-        let modes = [
-            IntraMode::TM,
-            IntraMode::VE,
-            IntraMode::HE,
-            IntraMode::DC,
-            IntraMode::LD,
-            IntraMode::RD,
-            IntraMode::VR,
-            IntraMode::VL,
-            IntraMode::HD,
-            IntraMode::HU,
-            IntraMode::TM,
-            IntraMode::VE,
-            IntraMode::HE,
-            IntraMode::DC,
-            IntraMode::LD,
-            IntraMode::RD,
-        ];
-
-        b.iter(|| {
-            black_box(predict_4x4(&mut v, W * 2, &modes, &res_data));
-        });
-    }
-
-    #[bench]
     fn bench_predict_bvepred(b: &mut Bencher) {
         let mut v = make_sample_image();
 
