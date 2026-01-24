@@ -363,11 +363,7 @@ const fn length_to_symbol(len: u16) -> (u16, u8) {
 }
 
 #[inline(always)]
-fn count_run(
-    pixel: &[u8],
-    it: &mut Peekable<ChunksExact<u8>>,
-    frequencies1: &mut [u32; 280],
-) {
+fn count_run(pixel: &[u8], it: &mut Peekable<ChunksExact<u8>>, frequencies1: &mut [u32; 280]) {
     let mut run_length = 0;
     while run_length < 4096 && it.peek() == Some(&pixel) {
         run_length += 1;
@@ -1328,8 +1324,7 @@ impl<'a> WebPEncoder<'a> {
 
         if use_simple_container {
             self.writer.write_all(b"RIFF");
-            self.writer
-                .write_u32_le(chunk_size(frame.len()) + 4);
+            self.writer.write_u32_le(chunk_size(frame.len()) + 4);
             self.writer.write_all(b"WEBP");
             write_chunk(self.writer, frame_chunk, &frame);
         } else {

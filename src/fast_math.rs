@@ -178,6 +178,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)] // Intentional approximate values for test cases
     fn test_pow_typical_values() {
         // Test values typical for our trellis quantization
         // c_base in [0, 1], expn close to 1.0

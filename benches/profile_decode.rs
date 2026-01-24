@@ -34,8 +34,7 @@ fn benchmark_decode(webp_data: &[u8], iterations: usize) {
     let only_libwebp = std::env::var("BENCH_LIBWEBP").is_ok();
 
     // Decode once to get dimensions and buffer size
-    let cursor = std::io::Cursor::new(webp_data);
-    let decoder = zenwebp::WebPDecoder::new(cursor).unwrap();
+    let decoder = zenwebp::WebPDecoder::new(webp_data).unwrap();
     let (width, height) = decoder.dimensions();
     let output_size = decoder.output_buffer_size().unwrap();
     println!("Image: {}x{} ({} pixels)", width, height, width * height);
@@ -51,8 +50,7 @@ fn benchmark_decode(webp_data: &[u8], iterations: usize) {
         println!("\n=== Our Decoder ===");
         let start = Instant::now();
         for _ in 0..iterations {
-            let cursor = std::io::Cursor::new(webp_data);
-            let mut decoder = zenwebp::WebPDecoder::new(cursor).unwrap();
+            let mut decoder = zenwebp::WebPDecoder::new(webp_data).unwrap();
             let mut output = vec![0u8; output_size];
             decoder.read_image(&mut output).unwrap();
         }

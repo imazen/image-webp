@@ -782,7 +782,6 @@ impl I4Predictions {
 #[cfg(all(test, feature = "_benchmarks"))]
 mod benches {
     use super::*;
-    use crate::vp8_common::IntraMode;
     use test::{black_box, Bencher};
 
     const W: usize = 256;

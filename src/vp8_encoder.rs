@@ -70,11 +70,11 @@ fn sse_16x16_luma(
     mby: usize,
     pred: &[u8; LUMA_BLOCK_SIZE],
 ) -> u32 {
-    #[cfg(feature = "simd")]
+    #[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "x86")))]
     {
         crate::simd_sse::sse_16x16_luma(src_y, src_width, mbx, mby, pred)
     }
-    #[cfg(not(feature = "simd"))]
+    #[cfg(not(all(feature = "simd", any(target_arch = "x86_64", target_arch = "x86"))))]
     {
         let mut sse = 0u32;
         let src_base = mby * 16 * src_width + mbx * 16;
@@ -101,11 +101,11 @@ fn sse_8x8_chroma(
     mby: usize,
     pred: &[u8; CHROMA_BLOCK_SIZE],
 ) -> u32 {
-    #[cfg(feature = "simd")]
+    #[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "x86")))]
     {
         crate::simd_sse::sse_8x8_chroma(src_uv, src_width, mbx, mby, pred)
     }
-    #[cfg(not(feature = "simd"))]
+    #[cfg(not(all(feature = "simd", any(target_arch = "x86_64", target_arch = "x86"))))]
     {
         let mut sse = 0u32;
         let src_base = mby * 8 * src_width + mbx * 8;
@@ -1952,9 +1952,12 @@ impl<'a> Vp8Encoder<'a> {
                     transform::idct4x4(&mut dequantized);
 
                     // Compute SSE between source and reconstructed using SIMD
-                    #[cfg(feature = "simd")]
+                    #[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "x86")))]
                     let sse = crate::simd_sse::sse4x4_with_residual(&src_block, pred, &dequantized);
-                    #[cfg(not(feature = "simd"))]
+                    #[cfg(not(all(
+                        feature = "simd",
+                        any(target_arch = "x86_64", target_arch = "x86")
+                    )))]
                     let sse = {
                         let mut sum = 0u32;
                         for i in 0..16 {
