@@ -1097,7 +1097,7 @@ impl<'a> Vp8Encoder<'a> {
                 if self.do_trellis {
                     // Trellis quantization: optimizes coefficient levels for RD
                     let mut coeffs = *block;
-                    // Use same ctype as record_coeffs: TokenType I4=3 or I16AC=1
+                    // Use same ctype as record_coeffs: TokenType I4=3 or I16AC=0
                     let ctype = token_type as usize;
                     trellis_quantize_block(
                         &mut coeffs,
