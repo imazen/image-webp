@@ -1264,12 +1264,17 @@ fn branch_cost(nb: i32, total: i32, proba: u8) -> i32 {
 }
 
 /// Token type for coefficient encoding
+/// Values must match libwebp's type indices:
+/// - TYPE_I16_AC = 0 (Y1 AC coefficients, first=1)
+/// - TYPE_I16_DC = 1 (Y2 DC coefficients, first=0)
+/// - TYPE_CHROMA_A = 2
+/// - TYPE_I4_AC = 3
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TokenType {
-    /// I16 DC coefficients (Y2/WHT)
-    I16DC = 0,
-    /// I16 AC coefficients (Y1 blocks with DC=0)
-    I16AC = 1,
+    /// I16 AC coefficients (Y1 blocks with DC=0) - must be 0 to match libwebp
+    I16AC = 0,
+    /// I16 DC coefficients (Y2/WHT) - must be 1 to match libwebp
+    I16DC = 1,
     /// Chroma (UV) coefficients
     Chroma = 2,
     /// I4 coefficients
