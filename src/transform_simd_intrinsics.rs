@@ -29,7 +29,32 @@ pub(crate) fn dct4x4_intrinsics(block: &mut [i32; 16]) {
             crate::transform::dct4x4_scalar(block);
         }
     }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
+    #[cfg(target_arch = "wasm32")]
+    {
+        use archmage::{Simd128Token, SimdToken};
+        // WASM SIMD128 is always available when compiled with +simd128
+        if let Some(token) = Simd128Token::try_new() {
+            crate::transform_wasm::dct4x4_wasm(token, block);
+        } else {
+            crate::transform::dct4x4_scalar(block);
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        use archmage::{NeonToken, SimdToken};
+        // NEON is always available on AArch64
+        if let Some(token) = NeonToken::try_new() {
+            crate::transform_aarch64::dct4x4_neon(token, block);
+        } else {
+            crate::transform::dct4x4_scalar(block);
+        }
+    }
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        target_arch = "x86",
+        target_arch = "wasm32",
+        target_arch = "aarch64"
+    )))]
     {
         crate::transform::dct4x4_scalar(block);
     }
@@ -48,7 +73,30 @@ pub(crate) fn idct4x4_intrinsics(block: &mut [i32]) {
             crate::transform::idct4x4_scalar(block);
         }
     }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
+    #[cfg(target_arch = "wasm32")]
+    {
+        use archmage::{Simd128Token, SimdToken};
+        if let Some(token) = Simd128Token::try_new() {
+            crate::transform_wasm::idct4x4_wasm(token, block);
+        } else {
+            crate::transform::idct4x4_scalar(block);
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        use archmage::{NeonToken, SimdToken};
+        if let Some(token) = NeonToken::try_new() {
+            crate::transform_aarch64::idct4x4_neon(token, block);
+        } else {
+            crate::transform::idct4x4_scalar(block);
+        }
+    }
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        target_arch = "x86",
+        target_arch = "wasm32",
+        target_arch = "aarch64"
+    )))]
     {
         crate::transform::idct4x4_scalar(block);
     }
@@ -67,7 +115,34 @@ pub(crate) fn dct4x4_two_intrinsics(block1: &mut [i32; 16], block2: &mut [i32; 1
             crate::transform::dct4x4_scalar(block2);
         }
     }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
+    #[cfg(target_arch = "wasm32")]
+    {
+        use archmage::{Simd128Token, SimdToken};
+        if let Some(token) = Simd128Token::try_new() {
+            crate::transform_wasm::dct4x4_wasm(token, block1);
+            crate::transform_wasm::dct4x4_wasm(token, block2);
+        } else {
+            crate::transform::dct4x4_scalar(block1);
+            crate::transform::dct4x4_scalar(block2);
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        use archmage::{NeonToken, SimdToken};
+        if let Some(token) = NeonToken::try_new() {
+            crate::transform_aarch64::dct4x4_neon(token, block1);
+            crate::transform_aarch64::dct4x4_neon(token, block2);
+        } else {
+            crate::transform::dct4x4_scalar(block1);
+            crate::transform::dct4x4_scalar(block2);
+        }
+    }
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        target_arch = "x86",
+        target_arch = "wasm32",
+        target_arch = "aarch64"
+    )))]
     {
         crate::transform::dct4x4_scalar(block1);
         crate::transform::dct4x4_scalar(block2);

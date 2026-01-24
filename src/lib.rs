@@ -113,11 +113,15 @@ mod vp8_cost;
 mod vp8_encoder;
 
 // Shared modules (for encoder and decoder)
-#[cfg(feature = "simd")]
+#[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "x86")))]
 mod simd_sse;
 mod transform;
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
+mod transform_aarch64;
 #[cfg(feature = "simd")]
 mod transform_simd_intrinsics;
+#[cfg(all(feature = "simd", target_arch = "wasm32"))]
+mod transform_wasm;
 mod vp8_arithmetic_decoder;
 mod vp8_bit_reader;
 mod vp8_common;
