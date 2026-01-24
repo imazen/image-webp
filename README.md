@@ -7,9 +7,10 @@
 High-performance WebP encoding and decoding in pure Rust.
 
 **Forked from [`image-webp`](https://github.com/image-rs/image-webp)** with significant improvements:
-- **~1.8x faster decoding** (from ~2.5x slower than libwebp to ~1.4x slower)
+- **~2x faster decoding** (from ~3x slower than libwebp to ~1.4x slower)
 - **Lossy encoding** (the original only supported lossless)
-- **Complete API rewrite** with webpx-compatible interface
+- **Full no_std support** with alloc (both encoder and decoder)
+- **WASM SIMD128 support** for WebAssembly targets
 
 ## Current Status
 
@@ -27,31 +28,58 @@ High-performance WebP encoding and decoding in pure Rust.
 
 - Pure Rust implementation (no C dependencies)
 - `#![forbid(unsafe_code)]` - completely safe Rust
-- SIMD acceleration via `archmage` (SSE2/SSE4.1/AVX2)
+- SIMD acceleration via `archmage` (x86: SSE2/SSE4.1/AVX2, WASM: SIMD128)
+- **no_std + alloc** - full encoding/decoding without std
 - Lossy encoding with full mode search (I16, I4, UV modes)
 - Lossless encoding
 - Animation support (decode)
 - Alpha channel support
 - ICC, EXIF, XMP metadata extraction
-- no_std compatible (error types only; encoding/decoding requires std)
 
-## Usage
+## Quick Start
+
+### Decoding
 
 ```rust
-use zenwebp::{WebPDecoder, WebPEncoder, EncoderParams};
+use zenwebp::WebPDecoder;
 
-// Decode
-let decoder = WebPDecoder::new(reader)?;
-let image = decoder.decode()?;
+// From a slice (no_std compatible)
+let webp_data: &[u8] = &read_webp_file();
+let mut decoder = WebPDecoder::new(webp_data)?;
+let (width, height) = decoder.dimensions();
 
-// Encode lossy
-let encoder = WebPEncoder::new_with_params(writer, EncoderParams::lossy(75));
-encoder.encode(width, height, color_type, &data)?;
-
-// Encode lossless
-let encoder = WebPEncoder::new_with_params(writer, EncoderParams::lossless());
-encoder.encode(width, height, color_type, &data)?;
+// Allocate output buffer (RGBA)
+let mut output = vec![0u8; decoder.output_buffer_size()?];
+decoder.read_image(&mut output)?;
 ```
+
+### Encoding
+
+```rust
+use zenwebp::{WebPEncoder, EncoderParams, ColorType};
+
+// Lossy encoding (quality 0-100)
+let mut output = Vec::new();
+let mut encoder = WebPEncoder::new(&mut output);
+encoder.set_params(EncoderParams::lossy(75));
+encoder.encode(&rgb_data, width, height, ColorType::Rgb8)?;
+
+// Lossless encoding
+let mut output = Vec::new();
+let mut encoder = WebPEncoder::new(&mut output);
+encoder.set_params(EncoderParams::lossless());
+encoder.encode(&rgb_data, width, height, ColorType::Rgb8)?;
+```
+
+### no_std Usage
+
+```toml
+[dependencies]
+zenwebp = { version = "0.1", default-features = false }
+```
+
+Both encoder and decoder work with `no_std + alloc`. The decoder takes `&[u8]` slices,
+and the encoder writes to `Vec<u8>`. Only `encode_to_writer()` requires the `std` feature.
 
 ## Performance
 
