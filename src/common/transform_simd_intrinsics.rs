@@ -19,20 +19,23 @@ use safe_unaligned_simd::x86_64 as simd_mem;
 // =============================================================================
 
 /// Forward DCT with dynamic dispatch to best available implementation
+/// Uses multiversed for compile-time target feature optimization.
+#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+#[multiversed::multiversed("x86-64-v4", "x86-64-v3", "x86-64-v2")]
 pub(crate) fn dct4x4_intrinsics(block: &mut [i32; 16]) {
-    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-    {
-        // SSE4.1 implies SSE2; summon() is now fast (no env var check)
-        if let Some(token) = X64V3Token::summon() {
-            dct4x4_sse2(token, block);
-        } else {
-            crate::common::transform::dct4x4_scalar(block);
-        }
+    if let Some(token) = X64V3Token::summon() {
+        dct4x4_sse2(token, block);
+    } else {
+        crate::common::transform::dct4x4_scalar(block);
     }
+}
+
+/// Forward DCT - non-x86 fallback
+#[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
+pub(crate) fn dct4x4_intrinsics(block: &mut [i32; 16]) {
     #[cfg(target_arch = "wasm32")]
     {
         use archmage::{Simd128Token, SimdToken};
-        // WASM SIMD128 is always available when compiled with +simd128
         if let Some(token) = Simd128Token::try_new() {
             super::transform_wasm::dct4x4_wasm(token, block);
         } else {
@@ -42,37 +45,36 @@ pub(crate) fn dct4x4_intrinsics(block: &mut [i32; 16]) {
     #[cfg(target_arch = "aarch64")]
     {
         use archmage::{NeonToken, SimdToken};
-        // NEON is always available on AArch64
         if let Some(token) = NeonToken::try_new() {
             super::transform_aarch64::dct4x4_neon(token, block);
         } else {
             crate::common::transform::dct4x4_scalar(block);
         }
     }
-    #[cfg(not(any(
-        target_arch = "x86_64",
-        target_arch = "x86",
-        target_arch = "wasm32",
-        target_arch = "aarch64"
-    )))]
+    #[cfg(not(any(target_arch = "wasm32", target_arch = "aarch64")))]
     {
         crate::common::transform::dct4x4_scalar(block);
     }
 }
 
 /// Inverse DCT with dynamic dispatch
+/// Uses multiversed for compile-time target feature optimization.
+#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+#[multiversed::multiversed("x86-64-v4", "x86-64-v3", "x86-64-v2")]
+pub(crate) fn idct4x4_intrinsics(block: &mut [i32]) {
+    debug_assert!(block.len() >= 16);
+    if let Some(token) = X64V3Token::summon() {
+        idct4x4_sse2(token, block);
+    } else {
+        crate::common::transform::idct4x4_scalar(block);
+    }
+}
+
+/// Inverse DCT - non-x86 fallback
+#[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
 #[inline]
 pub(crate) fn idct4x4_intrinsics(block: &mut [i32]) {
     debug_assert!(block.len() >= 16);
-    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-    {
-        // SSE4.1 implies SSE2; summon() is now fast (no env var check)
-        if let Some(token) = X64V3Token::summon() {
-            idct4x4_sse2(token, block);
-        } else {
-            crate::common::transform::idct4x4_scalar(block);
-        }
-    }
     #[cfg(target_arch = "wasm32")]
     {
         use archmage::{Simd128Token, SimdToken};
@@ -91,12 +93,7 @@ pub(crate) fn idct4x4_intrinsics(block: &mut [i32]) {
             crate::common::transform::idct4x4_scalar(block);
         }
     }
-    #[cfg(not(any(
-        target_arch = "x86_64",
-        target_arch = "x86",
-        target_arch = "wasm32",
-        target_arch = "aarch64"
-    )))]
+    #[cfg(not(any(target_arch = "wasm32", target_arch = "aarch64")))]
     {
         crate::common::transform::idct4x4_scalar(block);
     }
