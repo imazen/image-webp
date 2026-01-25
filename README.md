@@ -122,6 +122,13 @@ Licensed under either [Apache License, Version 2.0](LICENSE-APACHE) or [MIT lice
 
 Contributions welcome! Please feel free to open issues or pull requests.
 
----
+## Credits
 
-*Developed with assistance from Claude (Anthropic). Code review recommended for production use.*
+- **[image-rs/image-webp](https://github.com/image-rs/image-webp)** - Original crate this was forked from
+- **[libwebp](https://chromium.googlesource.com/webm/libwebp)** (Google) - Reference implementation and algorithm source
+- **[wide](https://crates.io/crates/wide)** (Lokathor) - Portable SIMD types
+- **[archmage](https://crates.io/crates/archmage)** & **[magetypes](https://crates.io/crates/magetypes)** (Lilith) - Safe intrinsics
+- **[safe_unaligned_simd](https://crates.io/crates/safe_unaligned_simd)** (Lilith) - Safe unaligned SIMD operations
+- **Claude** (Anthropic) - AI development assistance
+
+Code review recommended for production use.
